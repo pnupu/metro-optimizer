@@ -1,0 +1,43 @@
+{
+  "name": "web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "serve": "vite preview",
+    "start": "vite",
+    "check-types": "vite build && tsc --noEmit",
+    "generate-pwa-assets": "pwa-assets-generator",
+    "env:generate": "varlock codegen"
+  },
+  "dependencies": {
+    "@metro-optimizer/ui": "workspace:*",
+    "@tailwindcss/vite": "^4.3.5",
+    "@tanstack/react-router": "^1.170.46",
+    "@varlock/vite-integration": "1.5.6",
+    "lucide-react": "catalog:",
+    "next-themes": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "sonner": "catalog:",
+    "varlock": "catalog:",
+    "vite-plugin-pwa": "^2.0.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@metro-optimizer/config": "workspace:*",
+    "@tanstack/react-router-devtools": "^1.167.3",
+    "@tanstack/router-plugin": "^1.169.0",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vite-pwa/assets-generator": "^2.0.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "postcss": "^8.5.32",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "^8.3.8"
+  }
+}

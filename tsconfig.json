@@ -1,0 +1,3 @@
+{
+  "extends": "@metro-optimizer/config/tsconfig.base.json"
+}
