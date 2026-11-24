@@ -1,9 +1,13 @@
 import {
+  Building2,
   Bus,
   ChevronLeft,
+  DoorOpen,
+  FileText,
   Footprints,
   Map as MapIcon,
   Ship,
+  Signpost,
   TrainFront,
   TramFront,
   TriangleAlert,
@@ -12,7 +16,7 @@ import type { ReactNode } from "react";
 
 import { delay, minutes, modeColor, MODE_NAME, time } from "@/lib/format";
 import type { MetroGuide, StationGuide, TrainEnd } from "@/lib/guidance";
-import { describeStep, entranceLabel, entranceShort, levelName } from "@/lib/guidance";
+import { describeStep, endOf, entranceShort, exitSign, levelName } from "@/lib/guidance";
 import type { Alert, Itinerary, Leg, Place } from "@/lib/transitous";
 import { gtfsId } from "@/lib/transitous";
 
@@ -143,33 +147,47 @@ function Alerts({ alerts }: { alerts?: Alert[] }) {
   );
 }
 
+function Row({ icon, children, muted }: { icon: ReactNode; children: ReactNode; muted?: boolean }) {
+  return (
+    <li className={`flex items-start gap-2 ${muted ? "text-muted-foreground" : ""}`}>
+      <span className="mt-0.5">{icon}</span>
+      <span>{children}</span>
+    </li>
+  );
+}
+
 function StationCard({
   guide,
   direction,
   trainEnd,
+  toward,
   onShow,
 }: {
   guide: StationGuide;
   direction: "in" | "out";
   trainEnd?: TrainEnd;
+  toward?: string;
   onShow: (f: Omit<MapFocus, "nonce">) => void;
 }) {
   const { station, entrance, platform, steps } = guide;
-  const platformEnd =
-    guide.trainPosition >= 0.6 ? "front" : guide.trainPosition <= 0.4 ? "back" : "middle";
+  const platformEnd = endOf(guide.trainPosition);
+  const sign = exitSign(entrance, direction);
+  const via = guide.path.via ?? [];
+  const signpost = <Signpost className="size-4 shrink-0 text-[#ff6319]" aria-hidden />;
   return (
     <section className="mt-2 rounded-lg border border-[#ff6319]/40 bg-[#ff6319]/5 p-3">
       <div className="flex items-start justify-between gap-2">
-        <div>
+        <div className="min-w-0">
           <div className="text-muted-foreground text-xs uppercase tracking-wide">
-            {direction === "in" ? "Into the station" : "Out of the station"} · {station.name}
+            {direction === "in" ? "Into" : "Out of"} {station.name} station
           </div>
           <div className="mt-0.5 flex items-center gap-2 font-semibold">
-            <span className="grid size-6 place-items-center rounded-full bg-[#ff6319] text-white text-xs">
+            <span className="grid size-6 shrink-0 place-items-center rounded-full bg-[#ff6319] text-white text-xs">
               {entrance.ref ?? "M"}
             </span>
-            {entranceLabel(entrance, station.name)}
+            {sign.title}
           </div>
+          {sign.where && <div className="mt-0.5 text-muted-foreground text-sm">{sign.where}</div>}
         </div>
         <button
           type="button"
@@ -179,6 +197,7 @@ function StationCard({
               lat: entrance.lat,
               level: platform.level ?? -1,
               zoom: 17.5,
+              fit: guide.path.line.map(([lng, lat]) => [lng, lat] as [number, number]),
             })
           }
           className="inline-flex shrink-0 items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs hover:bg-muted pointer-coarse:py-2"
@@ -188,23 +207,51 @@ function StationCard({
       </div>
       <ol className="mt-2 space-y-1.5 text-sm">
         {direction === "out" && (
-          <li className="flex items-center gap-2 text-muted-foreground">
-            <TrainFront className="size-4 shrink-0" aria-hidden /> Leave the train at the{" "}
-            {platformEnd}
-          </li>
+          <>
+            <Row icon={<TrainFront className="size-4 shrink-0" aria-hidden />} muted>
+              Leave the train at the {platformEnd}
+            </Row>
+            <Row icon={signpost}>
+              <strong>Follow signs for {sign.short}</strong>
+              {sign.signs.length > 2 && (
+                <span className="block text-muted-foreground text-xs">
+                  The exit {entrance.ref} signs also list {sign.signs.slice(2).join(", ")}.
+                </span>
+              )}
+            </Row>
+          </>
+        )}
+        {direction === "in" && via.length > 0 && (
+          <Row icon={<Building2 className="size-4 shrink-0" aria-hidden />}>
+            Through {via.join(", then ")}
+          </Row>
         )}
         {steps.map((s, i) => (
-          <li key={i} className="flex items-center gap-2">
-            <StepIcon mode={s.mode} />
-            <span>{describeStep(s)}</span>
-          </li>
+          <Row key={i} icon={<StepIcon mode={s.mode} />}>
+            {describeStep(s)}
+          </Row>
         ))}
         {direction === "in" && (
-          <li className="flex items-center gap-2 text-muted-foreground">
-            <TrainFront className="size-4 shrink-0" aria-hidden />
-            You reach the platform ({levelName(platform.level)}) near the {platformEnd} of the train
-            {trainEnd && trainEnd !== platformEnd ? `; walk to the ${trainEnd}` : ""}
-          </li>
+          <>
+            <Row icon={signpost}>
+              <strong>Follow signs for trains{toward ? ` toward ${toward}` : ""}</strong>
+            </Row>
+            <Row icon={<TrainFront className="size-4 shrink-0" aria-hidden />} muted>
+              You reach the platform ({levelName(platform.level)}) near the {platformEnd} of the
+              train
+              {trainEnd && trainEnd !== platformEnd ? `. Walk to the ${trainEnd}.` : "."}
+            </Row>
+          </>
+        )}
+        {direction === "out" && via.length > 0 && (
+          <Row icon={<Building2 className="size-4 shrink-0" aria-hidden />}>
+            Through {[...via].reverse().join(", then ")}
+          </Row>
+        )}
+        {direction === "out" && sign.where && (
+          <Row icon={<DoorOpen className="size-4 shrink-0" aria-hidden />} muted>
+            You come out at {sign.where}
+          </Row>
         )}
       </ol>
       {(guide.uncertain || guide.fallback || !platform.mapped) && (
@@ -215,6 +262,16 @@ function StationCard({
           {guide.uncertain ? "One level change is not mapped in OpenStreetMap. " : ""}
           {!platform.mapped ? "The platform is not mapped, so the train end is a guess." : ""}
         </p>
+      )}
+      {station.guideMap && (
+        <a
+          href={station.guideMap}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 inline-flex items-center gap-1 text-xs underline underline-offset-2 hover:text-foreground"
+        >
+          <FileText className="size-3.5" aria-hidden /> Official {station.name} station map (PDF)
+        </a>
       )}
     </section>
   );
@@ -266,6 +323,9 @@ export function ItineraryDetail({
                 guide={nextMetro.board}
                 direction="in"
                 trainEnd={nextMetro.trainEnd}
+                {...(itinerary.legs[i + 1]?.headsign
+                  ? { toward: itinerary.legs[i + 1]?.headsign }
+                  : {})}
                 onShow={onShow}
               />
             )}
@@ -303,6 +363,7 @@ export function ItineraryDetail({
                 guide={metro.board}
                 direction="in"
                 trainEnd={metro.trainEnd}
+                {...(leg.headsign ? { toward: leg.headsign } : {})}
                 onShow={onShow}
               />
             )}

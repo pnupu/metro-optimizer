@@ -32,6 +32,8 @@ export interface StationGuide {
   fallback: boolean;
   /** True when a level change on the path is not described in OSM. */
   uncertain: boolean;
+  /** True when the train runs from the platform axis start toward its end. */
+  alongAxis: boolean;
 }
 
 export interface MetroGuide {
@@ -153,10 +155,21 @@ function guideFor(
     steps,
     trainPosition:
       travel === undefined ? 0.5 : trainPosition(platform, travel, choice.path.position),
+    alongAxis:
+      travel === undefined ||
+      angleBetween(bearing(platform.axis[0], platform.axis[1]), travel) <= 90,
     profile,
     fallback: choice.fallback,
     uncertain: steps.some((s) => s.mode === "level"),
   };
+}
+
+/** Where on the platform a train end stops: a point on the platform axis. */
+export function trainEndPoint(guide: StationGuide, end: TrainEnd): LngLat {
+  const t = end === "front" ? 0.85 : end === "back" ? 0.15 : 0.5;
+  const f = guide.alongAxis ? t : 1 - t;
+  const [a, b] = guide.platform.axis;
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
 }
 
 /** Line of a leg as [lng, lat] points. */
@@ -223,16 +236,32 @@ export function describeStep(s: PathStep): string {
   }
 }
 
-/** "Entrance B · Kampinkuja"; a name that only repeats the station name is left out. */
-export function entranceLabel(e: Entrance, stationName?: string): string {
-  const name =
-    e.name && !(stationName && e.name.toLowerCase().includes(stationName.toLowerCase()))
-      ? e.name
-      : undefined;
-  if (e.ref && name) return `Entrance ${e.ref} · ${name}`;
-  if (e.ref) return `Entrance ${e.ref}`;
-  return name ? `Entrance · ${name}` : "Unlettered entrance";
+/**
+ * What the station signs say: HSL letters every exit and the signs list the street or building.
+ * `short` fits in "Follow signs for …".
+ */
+export function exitSign(
+  e: Entrance,
+  direction: "in" | "out",
+): { title: string; short: string; where?: string; signs: string[] } {
+  const word = direction === "in" ? "Entrance" : "Exit";
+  // An unlettered exit is already titled by its street: do not say the street twice.
+  const where = [e.ref ? e.street : undefined, e.place].filter(Boolean).join(" · ") || undefined;
+  const signs = e.signs ?? [];
+  const title = e.ref
+    ? `${word} ${e.ref}`
+    : e.street
+      ? `${word} at ${e.street}`
+      : `Unlettered ${word.toLowerCase()}`;
+  // The station's own sign text is best; else the street the exit opens onto.
+  const hint = signs.length > 0 ? signs.slice(0, 2).join(", ") : e.street;
+  const short = e.ref
+    ? `exit ${e.ref}${hint ? ` (${hint})` : ""}`
+    : e.street
+      ? `the exit to ${e.street}`
+      : "the exit";
+  return { title, short, signs, ...(where ? { where } : {}) };
 }
 
 /** "entrance B", or "the exit" when the entrance has no letter. */
-export const entranceShort = (e: Entrance) => (e.ref ? `entrance ${e.ref}` : "the exit");
+export const entranceShort = (e: Entrance) => (e.ref ? `exit ${e.ref}` : "the exit");

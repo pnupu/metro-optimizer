@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { modeColor } from "@/lib/format";
 import type { MetroGuide } from "@/lib/guidance";
-import { legLine, levelName } from "@/lib/guidance";
+import { exitSign, legLine, levelName, trainEndPoint } from "@/lib/guidance";
 import type { LngLat, StationData } from "@/lib/station-types";
 import { loadStation, useStationIndex } from "@/lib/stations";
 import type { Itinerary } from "@/lib/transitous";
@@ -20,6 +20,8 @@ export interface MapFocus {
   lat: number;
   level?: number;
   zoom?: number;
+  /** Fit these points into view instead of flying to lng/lat. */
+  fit?: [number, number][];
   /** Change this to fly again to the same place. */
   nonce: number;
 }
@@ -61,15 +63,58 @@ function englishLabels(map: MlMap) {
   }
 }
 
-/** Kind filters of the indoor layers; the level filter is added to these. */
+/** Kind filters of the floor-dependent layers; the level filter is added to these. */
 const BASE_FILTER: Record<string, maplibregl.FilterSpecification> = {
   "indoor-area": ["==", ["geometry-type"], "Polygon"],
-  "indoor-line": ["==", ["geometry-type"], "LineString"],
+  "indoor-outline": ["==", ["geometry-type"], "Polygon"],
+  "indoor-line": [
+    "all",
+    ["==", ["geometry-type"], "LineString"],
+    ["!", ["in", ["get", "kind"], ["literal", ["stairs", "escalator", "elevator"]]]],
+  ],
+  "indoor-line-casing": [
+    "all",
+    ["==", ["geometry-type"], "LineString"],
+    ["==", ["get", "kind"], "footway"],
+  ],
+  "indoor-vertical": [
+    "all",
+    ["==", ["geometry-type"], "LineString"],
+    ["in", ["get", "kind"], ["literal", ["stairs", "escalator", "elevator"]]],
+  ],
+  "indoor-vertical-label": [
+    "all",
+    ["==", ["geometry-type"], "LineString"],
+    ["in", ["get", "kind"], ["literal", ["stairs", "escalator", "elevator"]]],
+  ],
   "indoor-poi": ["all", ["==", ["get", "kind"], "poi"], ["has", "name"]],
-  "indoor-elevator": ["==", ["get", "kind"], "elevator"],
+  "indoor-room-label": ["all", ["==", ["geometry-type"], "Polygon"], ["has", "name"]],
+  "indoor-elevator": [
+    "all",
+    ["==", ["geometry-type"], "Point"],
+    ["==", ["get", "kind"], "elevator"],
+  ],
 };
 
-const OUR_LAYERS = new Set(["indoor-poi", "entrance-label"]);
+/** Our symbol layers stay visible underground; the basemap's are hidden there. */
+const OUR_LAYERS = new Set([
+  "indoor-poi",
+  "indoor-room-label",
+  "indoor-vertical-label",
+  "indoor-elevator-label",
+  "entrance-letter",
+  "entrance-label",
+  "station-path-arrows",
+  "pins-label",
+]);
+
+export const INDOOR_COLORS = {
+  path: "#ff6319",
+  stairs: "#7c3aed",
+  escalator: "#2563eb",
+  elevator: "#059669",
+  platform: "#ffb38f",
+};
 
 const levelFilter = (level: number): maplibregl.FilterSpecification => [
   "all",
@@ -77,25 +122,42 @@ const levelFilter = (level: number): maplibregl.FilterSpecification => [
   [">=", ["get", "lmax"], level],
 ];
 
+/** A level as text with a real minus sign, like the floor picker. */
+const levelText = (key: string): maplibregl.ExpressionSpecification => [
+  "case",
+  ["<", ["get", key], 0],
+  ["concat", "−", ["to-string", ["abs", ["get", key]]]],
+  ["to-string", ["get", key]],
+];
+
+/** " −2…0" from a feature's level range, or nothing for a single level. */
+const levelRange: maplibregl.ExpressionSpecification = [
+  "case",
+  ["==", ["get", "lmin"], ["get", "lmax"]],
+  "",
+  ["concat", " ", levelText("lmin"), "…", levelText("lmax")],
+];
+
 function addOverlays(map: MlMap, dark: boolean) {
   const fg = dark ? "#e5e7eb" : "#1f2937";
-  const halo = dark ? "#111827" : "#ffffff";
+  const halo = dark ? "#0b1220" : "#ffffff";
+  const C = INDOOR_COLORS;
+  for (const id of ["indoor", "station-paths", "route", "ends", "entrances", "pins"]) {
+    map.addSource(id, { type: "geojson", data: EMPTY });
+  }
   map.addSource("metro-lines", {
     type: "geojson",
     data: `${import.meta.env.BASE_URL}data/metro-lines.json`,
   });
-  map.addSource("indoor", { type: "geojson", data: EMPTY });
-  map.addSource("station-paths", { type: "geojson", data: EMPTY });
-  map.addSource("route", { type: "geojson", data: EMPTY });
-  map.addSource("ends", { type: "geojson", data: EMPTY });
 
+  // Underground the street map fades almost away, so the station plan reads like a floor plan.
   map.addLayer({
     id: "underground-dim",
     type: "background",
     layout: { visibility: "none" },
     paint: {
-      "background-color": dark ? "#000000" : "#0f172a",
-      "background-opacity": dark ? 0.55 : 0.45,
+      "background-color": dark ? "#05080f" : "#cfd6df",
+      "background-opacity": 0.9,
     },
   });
   map.addLayer({
@@ -103,12 +165,11 @@ function addOverlays(map: MlMap, dark: boolean) {
     type: "line",
     source: "metro-lines",
     paint: {
-      "line-color": "#ff6319",
+      "line-color": C.path,
       "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2, 16, 6],
       "line-opacity": 0.55,
     },
   });
-  // Indoor map: areas, then lines, then points.
   map.addLayer({
     id: "indoor-area",
     type: "fill",
@@ -120,15 +181,38 @@ function addOverlays(map: MlMap, dark: boolean) {
         "match",
         ["get", "kind"],
         "platform",
-        "#ffb38f",
+        C.platform,
         "corridor-area",
-        dark ? "#374151" : "#f3f4f6",
+        dark ? "#334155" : "#ffffff",
         "room",
-        dark ? "#1f2937" : "#fde9c9",
-        dark ? "#273244" : "#e5e7eb",
+        dark ? "#3b3326" : "#fbe7cc",
+        dark ? "#1e293b" : "#f8fafc",
       ],
-      "fill-opacity": 0.9,
-      "fill-outline-color": dark ? "#9ca3af" : "#9ca3af",
+      "fill-opacity": 0.95,
+    },
+  });
+  map.addLayer({
+    id: "indoor-outline",
+    type: "line",
+    source: "indoor",
+    minzoom: INDOOR_ZOOM,
+    filter: BASE_FILTER["indoor-outline"],
+    paint: {
+      "line-color": dark ? "#94a3b8" : "#64748b",
+      "line-width": ["interpolate", ["linear"], ["zoom"], 16, 0.6, 19, 1.6],
+    },
+  });
+  // Walkways read as hallways: a grey edge with a light fill.
+  map.addLayer({
+    id: "indoor-line-casing",
+    type: "line",
+    source: "indoor",
+    minzoom: INDOOR_ZOOM,
+    filter: BASE_FILTER["indoor-line-casing"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": dark ? "#64748b" : "#94a3b8",
+      "line-width": ["interpolate", ["linear"], ["zoom"], 16, 4, 19, 14],
     },
   });
   map.addLayer({
@@ -137,43 +221,72 @@ function addOverlays(map: MlMap, dark: boolean) {
     source: "indoor",
     minzoom: INDOOR_ZOOM,
     filter: BASE_FILTER["indoor-line"],
+    layout: { "line-cap": "round", "line-join": "round" },
     paint: {
       "line-color": [
         "match",
         ["get", "kind"],
         "track",
-        "#ff6319",
+        dark ? "#7c2d12" : "#c2410c",
         "platform",
         "#ff8a50",
-        "escalator",
-        "#2563eb",
-        "stairs",
-        "#7c3aed",
-        "elevator",
-        "#059669",
-        dark ? "#9ca3af" : "#6b7280",
+        dark ? "#334155" : "#ffffff",
       ],
+      "line-opacity": ["match", ["get", "kind"], "track", 0.45, 1],
+      // A zoom expression must be the outermost one, so the kinds go inside each stop.
       "line-width": [
-        "match",
-        ["get", "kind"],
-        "track",
-        3,
-        "platform",
-        6,
-        "escalator",
-        4,
-        "stairs",
-        4,
-        2,
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        16,
+        ["match", ["get", "kind"], "track", 1.5, "platform", 5, 2.5],
+        19,
+        ["match", ["get", "kind"], "track", 1.5, "platform", 5, 11],
       ],
       "line-dasharray": [
         "match",
         ["get", "kind"],
-        "stairs",
-        ["literal", [1, 0.6]],
+        "track",
+        ["literal", [4, 3]],
         ["literal", [1, 0]],
       ],
     },
+  });
+  map.addLayer({
+    id: "indoor-vertical",
+    type: "line",
+    source: "indoor",
+    minzoom: INDOOR_ZOOM,
+    filter: BASE_FILTER["indoor-vertical"],
+    layout: { "line-cap": "butt" },
+    paint: {
+      "line-color": [
+        "match",
+        ["get", "kind"],
+        "stairs",
+        C.stairs,
+        "escalator",
+        C.escalator,
+        C.elevator,
+      ],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 16, 4, 19, 10],
+      "line-dasharray": [
+        "match",
+        ["get", "kind"],
+        "stairs",
+        ["literal", [0.35, 0.25]],
+        ["literal", [1, 0]],
+      ],
+    },
+  });
+  // In-station path: casing, line, and arrows in walking direction.
+  map.addLayer({
+    id: "station-path-casing",
+    type: "line",
+    source: "station-paths",
+    filter: ["boolean", ["get", "current"], true],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": halo, "line-width": 10 },
   });
   map.addLayer({
     id: "station-path",
@@ -181,10 +294,33 @@ function addOverlays(map: MlMap, dark: boolean) {
     source: "station-paths",
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
-      "line-color": "#ff6319",
-      "line-width": 5,
-      "line-opacity": ["case", ["boolean", ["get", "current"], true], 1, 0.35],
+      "line-color": C.path,
+      "line-width": ["case", ["boolean", ["get", "current"], true], 6, 3],
+      "line-opacity": ["case", ["boolean", ["get", "current"], true], 1, 0.4],
+      "line-dasharray": [
+        "case",
+        ["boolean", ["get", "current"], true],
+        ["literal", [1, 0]],
+        ["literal", [1.5, 1.5]],
+      ],
     },
+  });
+  map.addLayer({
+    id: "station-path-arrows",
+    type: "symbol",
+    source: "station-paths",
+    filter: ["boolean", ["get", "current"], true],
+    layout: {
+      "symbol-placement": "line",
+      "symbol-spacing": 40,
+      "text-field": "›",
+      "text-font": FONT_BOLD,
+      "text-size": 20,
+      "text-keep-upright": false,
+      "text-allow-overlap": true,
+      "text-offset": [0, -0.1],
+    },
+    paint: { "text-color": "#ffffff" },
   });
   map.addLayer({
     id: "route-casing",
@@ -210,18 +346,73 @@ function addOverlays(map: MlMap, dark: boolean) {
     },
   });
   map.addLayer({
-    id: "indoor-poi",
+    id: "indoor-room-label",
     type: "symbol",
     source: "indoor",
-    minzoom: 17,
-    filter: BASE_FILTER["indoor-poi"],
+    minzoom: 17.5,
+    filter: BASE_FILTER["indoor-room-label"],
     layout: {
       "text-field": ["get", "name"],
       "text-font": FONT,
       "text-size": 11,
+      "text-max-width": 8,
       "text-optional": true,
     },
-    paint: { "text-color": fg, "text-halo-color": halo, "text-halo-width": 1.2 },
+    paint: {
+      "text-color": dark ? "#cbd5e1" : "#475569",
+      "text-halo-color": halo,
+      "text-halo-width": 1,
+    },
+  });
+  map.addLayer({
+    id: "indoor-poi",
+    type: "symbol",
+    source: "indoor",
+    minzoom: 18,
+    filter: BASE_FILTER["indoor-poi"],
+    layout: {
+      "text-field": ["get", "name"],
+      "text-font": FONT,
+      "text-size": 10,
+      "text-optional": true,
+    },
+    paint: {
+      "text-color": dark ? "#cbd5e1" : "#475569",
+      "text-halo-color": halo,
+      "text-halo-width": 1,
+    },
+  });
+  map.addLayer({
+    id: "indoor-vertical-label",
+    type: "symbol",
+    source: "indoor",
+    minzoom: 17,
+    filter: BASE_FILTER["indoor-vertical-label"],
+    layout: {
+      "symbol-placement": "line-center",
+      "text-field": [
+        "concat",
+        ["match", ["get", "kind"], "stairs", "Stairs", "escalator", "Escalator", "Lift"],
+        levelRange,
+      ],
+      "text-font": FONT_BOLD,
+      "text-size": 11,
+      "text-offset": [0, -1],
+      "text-optional": true,
+    },
+    paint: {
+      "text-color": [
+        "match",
+        ["get", "kind"],
+        "stairs",
+        C.stairs,
+        "escalator",
+        C.escalator,
+        C.elevator,
+      ],
+      "text-halo-color": halo,
+      "text-halo-width": 1.5,
+    },
   });
   map.addLayer({
     id: "indoor-elevator",
@@ -230,38 +421,102 @@ function addOverlays(map: MlMap, dark: boolean) {
     minzoom: 16,
     filter: BASE_FILTER["indoor-elevator"],
     paint: {
-      "circle-radius": 6,
-      "circle-color": "#059669",
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 16, 5, 19, 9],
+      "circle-color": C.elevator,
       "circle-stroke-color": halo,
       "circle-stroke-width": 2,
     },
   });
   map.addLayer({
+    id: "indoor-elevator-label",
+    type: "symbol",
+    source: "indoor",
+    minzoom: 17,
+    filter: BASE_FILTER["indoor-elevator"],
+    layout: {
+      "text-field": ["concat", "Lift", levelRange],
+      "text-font": FONT_BOLD,
+      "text-size": 11,
+      "text-offset": [0, 1.3],
+      "text-optional": true,
+    },
+    paint: { "text-color": C.elevator, "text-halo-color": halo, "text-halo-width": 1.5 },
+  });
+  // Entrances on every floor: a lettered disc, and the sign text when zoomed in.
+  map.addLayer({
     id: "entrance",
     type: "circle",
-    source: "indoor",
+    source: "entrances",
     minzoom: INDOOR_ZOOM,
-    filter: ["==", ["get", "kind"], "entrance"],
     paint: {
-      "circle-radius": 10,
-      "circle-color": "#ff6319",
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 15, 7, 18, 12],
+      "circle-color": [
+        "case",
+        ["boolean", ["get", "used"], false],
+        C.path,
+        dark ? "#475569" : "#334155",
+      ],
       "circle-stroke-color": halo,
       "circle-stroke-width": 2,
     },
+  });
+  map.addLayer({
+    id: "entrance-letter",
+    type: "symbol",
+    source: "entrances",
+    minzoom: INDOOR_ZOOM,
+    layout: {
+      "text-field": ["coalesce", ["get", "ref"], "M"],
+      "text-font": FONT_BOLD,
+      "text-size": ["interpolate", ["linear"], ["zoom"], 15, 10, 18, 13],
+      "text-allow-overlap": true,
+    },
+    paint: { "text-color": "#ffffff" },
   });
   map.addLayer({
     id: "entrance-label",
     type: "symbol",
-    source: "indoor",
-    minzoom: INDOOR_ZOOM,
-    filter: ["==", ["get", "kind"], "entrance"],
+    source: "entrances",
+    minzoom: 17,
+    filter: ["has", "sign"],
     layout: {
-      "text-field": ["coalesce", ["get", "ref"], "M"],
+      "text-field": ["get", "sign"],
+      "text-font": FONT,
+      "text-size": 11,
+      "text-anchor": "left",
+      "text-offset": [1.3, 0],
+      "text-max-width": 10,
+      "text-optional": true,
+    },
+    paint: { "text-color": fg, "text-halo-color": halo, "text-halo-width": 1.5 },
+  });
+  map.addLayer({
+    id: "pins",
+    type: "circle",
+    source: "pins",
+    minzoom: INDOOR_ZOOM,
+    paint: {
+      "circle-radius": 7,
+      "circle-color": "#111827",
+      "circle-stroke-color": C.path,
+      "circle-stroke-width": 3,
+    },
+  });
+  map.addLayer({
+    id: "pins-label",
+    type: "symbol",
+    source: "pins",
+    minzoom: INDOOR_ZOOM,
+    layout: {
+      "text-field": ["get", "label"],
       "text-font": FONT_BOLD,
       "text-size": 12,
-      "text-allow-overlap": true,
+      "text-variable-anchor": ["top", "bottom", "left", "right"],
+      "text-radial-offset": 0.9,
+      "text-justify": "auto",
+      "text-max-width": 12,
     },
-    paint: { "text-color": "#ffffff" },
+    paint: { "text-color": fg, "text-halo-color": halo, "text-halo-width": 2 },
   });
   map.addLayer({
     id: "ends",
@@ -274,6 +529,42 @@ function addOverlays(map: MlMap, dark: boolean) {
       "circle-stroke-width": 3,
     },
   });
+}
+
+function Key({
+  color,
+  label,
+  dashed,
+  dot,
+  block,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+  dot?: boolean;
+  block?: boolean;
+}) {
+  return (
+    <li className="flex items-center gap-1.5">
+      {dot ? (
+        <span className="size-2.5 shrink-0 rounded-full" style={{ background: color }} />
+      ) : block ? (
+        <span className="h-2.5 w-4 shrink-0 rounded-sm" style={{ background: color }} />
+      ) : (
+        <span
+          className="h-1 w-4 shrink-0 rounded"
+          style={
+            dashed
+              ? {
+                  backgroundImage: `repeating-linear-gradient(90deg, ${color} 0 3px, transparent 3px 5px)`,
+                }
+              : { background: color }
+          }
+        />
+      )}
+      {label}
+    </li>
+  );
 }
 
 export function MapView({ itinerary, guides, from, to, focus }: Props) {
@@ -394,9 +685,31 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
     if (!map || !ready) return;
     (map.getSource("indoor") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
-      features: shown.flatMap((s) => s.indoor.features),
+      features: shown.flatMap((s) =>
+        s.indoor.features.filter((f) => f.properties.kind !== "entrance"),
+      ),
     } as GeoJSON.FeatureCollection);
-  }, [shown, ready]);
+    const used = new Set(
+      guides.flatMap((g) => [g.board?.entrance.id, g.alight?.entrance.id]).filter(Boolean),
+    );
+    (map.getSource("entrances") as GeoJSONSource | undefined)?.setData({
+      type: "FeatureCollection",
+      features: shown.flatMap((s) =>
+        s.entrances.map((e) => {
+          const where = exitSign(e, "out").where;
+          return {
+            type: "Feature" as const,
+            properties: {
+              ...(e.ref ? { ref: e.ref } : {}),
+              ...(where ? { sign: e.ref ? `${e.ref} · ${where}` : where } : {}),
+              used: used.has(e.id),
+            },
+            geometry: { type: "Point" as const, coordinates: [e.lng, e.lat] },
+          };
+        }),
+      ),
+    });
+  }, [shown, ready, guides]);
 
   // Level filter and the underground shade.
   useEffect(() => {
@@ -430,28 +743,61 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
       type: "FeatureCollection",
       features,
     });
-    const paths: GeoJSON.Feature[] = guides
-      .flatMap((g) => [g.board, g.alight])
-      .filter((g) => !!g)
-      .flatMap((g) => {
-        // Split the path by level so each part can show on its own level.
-        const parts: { level: number | null; coords: LngLat[] }[] = [];
-        for (const [lng, lat, lv] of g.path.line) {
-          const last = parts.at(-1);
-          if (last && last.level === lv) last.coords.push([lng, lat]);
-          else {
-            const prev = last?.coords.at(-1);
-            parts.push({ level: lv, coords: prev ? [prev, [lng, lat]] : [[lng, lat]] });
-          }
+    // Paths in walking order: into the station for boarding, out of it after the ride.
+    const walked = guides.flatMap((g) => [
+      ...(g.board
+        ? [{ guide: g.board, line: g.board.path.line, end: g.trainEnd, out: false }]
+        : []),
+      ...(g.alight
+        ? [{ guide: g.alight, line: [...g.alight.path.line].reverse(), end: g.trainEnd, out: true }]
+        : []),
+    ]);
+    const pins: GeoJSON.Feature[] = walked.flatMap(({ guide, line, end, out }) => {
+      // The board / get-off pin marks the train end on the platform, not where the path arrives.
+      const platformPoint = end ? trainEndPoint(guide, end) : out ? line[0] : line.at(-1);
+      const exitPoint = out ? line.at(-1) : line[0];
+      const sign = exitSign(guide.entrance, out ? "out" : "in");
+      const pin = (p: typeof platformPoint, label: string): GeoJSON.Feature[] =>
+        p
+          ? [
+              {
+                type: "Feature",
+                properties: { label },
+                geometry: { type: "Point", coordinates: [p[0], p[1]] },
+              },
+            ]
+          : [];
+      return [
+        ...pin(
+          platformPoint,
+          out ? `Get off${end ? ` at the ${end}` : ""}` : `Board${end ? ` at the ${end}` : ""}`,
+        ),
+        ...pin(exitPoint, sign.title),
+      ];
+    });
+    (map.getSource("pins") as GeoJSONSource | undefined)?.setData({
+      type: "FeatureCollection",
+      features: pins,
+    });
+    const paths: GeoJSON.Feature[] = walked.flatMap(({ line }) => {
+      // Split the path by level so each part can show on its own level.
+      const parts: { level: number | null; coords: LngLat[] }[] = [];
+      for (const [lng, lat, lv] of line) {
+        const last = parts.at(-1);
+        if (last && last.level === lv) last.coords.push([lng, lat]);
+        else {
+          const prev = last?.coords.at(-1);
+          parts.push({ level: lv, coords: prev ? [prev, [lng, lat]] : [[lng, lat]] });
         }
-        return parts
-          .filter((p) => p.coords.length > 1)
-          .map((p) => ({
-            type: "Feature" as const,
-            properties: { current: p.level === null || p.level === level },
-            geometry: { type: "LineString" as const, coordinates: p.coords },
-          }));
-      });
+      }
+      return parts
+        .filter((p) => p.coords.length > 1)
+        .map((p) => ({
+          type: "Feature" as const,
+          properties: { current: p.level === null || p.level === level },
+          geometry: { type: "LineString" as const, coordinates: p.coords },
+        }));
+    });
     (map.getSource("station-paths") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
       features: paths,
@@ -497,7 +843,20 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !focus) return;
-    map.flyTo({ center: [focus.lng, focus.lat], zoom: focus.zoom ?? 17.5, duration: 800 });
+    if (focus.fit && focus.fit.length > 1) {
+      const b = new maplibregl.LngLatBounds(focus.fit[0], focus.fit[0]);
+      for (const p of focus.fit) b.extend(p);
+      const phone = window.innerWidth < 768;
+      map.fitBounds(b, {
+        padding: phone
+          ? { top: 120, bottom: 170, left: 50, right: 90 }
+          : { top: 120, bottom: 60, left: 80, right: 100 },
+        maxZoom: 18.5,
+        duration: 800,
+      });
+    } else {
+      map.flyTo({ center: [focus.lng, focus.lat], zoom: focus.zoom ?? 17.5, duration: 800 });
+    }
     if (focus.level !== undefined) setLevel(focus.level);
   }, [focus]);
 
@@ -506,7 +865,7 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
       <div ref={container} className="h-full w-full" />
       {levels.length > 1 && (
         <div
-          className="absolute top-40 right-2.5 z-10 flex max-h-[38svh] flex-col overflow-y-auto rounded-md border bg-background/95 shadow-md md:top-32"
+          className="absolute top-40 right-2.5 z-10 flex max-h-[38svh] flex-col overflow-y-auto rounded-md border bg-background/95 shadow-md md:top-44"
           role="radiogroup"
           aria-label="Floor"
         >
@@ -522,14 +881,28 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
                 l === level ? "bg-[#ff6319] text-white" : "hover:bg-muted"
               }`}
             >
-              {l === 0 ? "S" : l > 0 ? l : `−${-l}`}
+              {l === 0 ? "0" : l > 0 ? l : `−${-l}`}
             </button>
           ))}
         </div>
       )}
-      {level < 0 && levels.length > 0 && (
-        <div className="pointer-events-none absolute top-2 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/75 px-3 py-1 text-xs text-white md:top-3">
-          Underground · {levelName(level)}
+      {levels.length > 0 && (
+        <div className="pointer-events-none absolute top-2 left-2 z-10 max-w-[60%] rounded-lg bg-background/95 px-2.5 py-1.5 text-[11px] shadow-md md:top-3 md:left-3">
+          <div className="mb-1 font-semibold text-xs">
+            {level === 0 ? "Street level" : `Level ${level > 0 ? level : `−${-level}`}`}
+            <span className="font-normal text-muted-foreground">
+              {level < 0 ? " · below street" : level > 0 ? " · above street" : ""}
+            </span>
+          </div>
+          <ul className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+            <Key color={INDOOR_COLORS.path} label="Your path" />
+            <Key color={INDOOR_COLORS.platform} label="Platform" block />
+            <Key color={INDOOR_COLORS.stairs} label="Stairs" dashed />
+            <Key color={INDOOR_COLORS.escalator} label="Escalator" />
+            <Key color={INDOOR_COLORS.elevator} label="Lift" dot />
+            <Key color={dark ? "#475569" : "#334155"} label="Exit letter" dot />
+            <Key color={INDOOR_COLORS.path} label="Your exit" dot />
+          </ul>
         </div>
       )}
     </div>

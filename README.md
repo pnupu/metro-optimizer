@@ -10,6 +10,16 @@ the train to board so you step off next to your exit. All text is in English.
 - **Maps:** [OpenFreeMap](https://openfreemap.org/) street map with English labels, plus an indoor
   and underground layer with a floor picker, drawn from the same OSM data.
 
+## Exit signs
+
+The station steps say "Follow signs for exit D (Kamppi Shopping Centre, Forum Shopping Centre)".
+For 11 Helsinki stations the destinations come from the City of Helsinki station guide maps
+(`hel.fi/static/hkl/metroasema_opaskartat/<station>.pdf`): the data builder reads the PDF's exit
+table by text position, letters the blocks in reading order, and uses them only when the blocks fit
+the station's lettered exits in OSM. Elsewhere the sign text is the street the exit opens onto (OSM
+address or nearest named street) and the building or shopping centre it leads into. The app links
+each station's guide map.
+
 ## Route modes
 
 | Mode      | Station paths may use                                        |

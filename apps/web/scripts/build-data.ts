@@ -10,6 +10,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { getDocumentProxy } from "unpdf";
+
+import { type ExitSigns, parseExitTable, type TextItem } from "../src/lib/exit-table";
 import { buildStation, type GtfsStation, type OsmElement } from "../src/lib/station-graph";
 import type { StationData, StationIndex } from "../src/lib/station-types";
 
@@ -20,6 +23,14 @@ const GTFS_URL = "https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip";
 const OSM_API = "https://api.openstreetmap.org/api/0.6/map.json";
 const USER_AGENT = "metro-optimizer-data-builder/0.1 (+https://github.com/pnupu/metro-optimizer)";
 const REFRESH = process.argv.includes("--refresh");
+/** City of Helsinki station guide maps (Helsinki stations only; Espoo stations have none). */
+const GUIDE_MAPS = "https://www.hel.fi/static/hkl/metroasema_opaskartat";
+/**
+ * Exit tables compared by eye with the PDF image, where OSM lacks the last letters so the
+ * automatic check cannot pass. Not trusted on layout alone: a list can run on into the next
+ * column (Helsingin yliopisto exit D does), which shifts every later letter.
+ */
+const CHECKED_TABLES = new Set(["Sörnäinen"]); // 2026-11-24: A–G match the drawing
 const DAY = 86_400_000;
 /** Half size of the OSM box around a station (about 300 m each way). */
 const BOX = { lat: 0.0028, lon: 0.0055 };
@@ -82,8 +93,64 @@ function* csvRows(text: string): Generator<Record<string, string>> {
   }
 }
 
+/** The station guide PDF and its exit table, if the city publishes one for this station. */
+async function guideMap(name: string): Promise<{ url: string; exits?: ExitSigns[] } | undefined> {
+  const base = name.toLowerCase().replace(/ä/g, "a").replace(/ö/g, "o").replace(/å/g, "a");
+  for (const slug of new Set([base.replace(/[^a-z0-9]+/g, "_"), base.replace(/[^a-z0-9]+/g, "")])) {
+    const url = `${GUIDE_MAPS}/${slug}.pdf`;
+    const path = join(CACHE, "guide-maps", `${slug}.pdf`);
+    const cachedFile = Bun.file(path);
+    const have = await cachedFile.exists();
+    if (REFRESH || !have || Date.now() - cachedFile.lastModified >= DAY) {
+      try {
+        const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+        if (res.ok && (res.headers.get("content-type") ?? "").includes("pdf"))
+          await Bun.write(path, res);
+        else if (!have) continue;
+      } catch (error) {
+        // Keep a stale copy rather than lose the station's signs; with no copy, skip it.
+        console.warn(`  guide map ${url}: ${String(error)}`);
+        if (!have) continue;
+      }
+    }
+    try {
+      return { url, ...(await readExitTable(path)) };
+    } catch (error) {
+      console.warn(`  guide map ${path} unreadable: ${String(error)}`);
+      return { url };
+    }
+  }
+  return undefined;
+}
+
+async function readExitTable(path: string): Promise<{ exits?: ExitSigns[] }> {
+  const pdf = await getDocumentProxy(new Uint8Array(await Bun.file(path).arrayBuffer()));
+  try {
+    const page = await pdf.getPage(1);
+    const height = page.getViewport({ scale: 1 }).height;
+    const content = await page.getTextContent();
+    const items: TextItem[] = [];
+    for (const it of content.items) {
+      if (!("str" in it) || !it.str) continue;
+      items.push({
+        str: it.str,
+        x: it.transform[4],
+        y: height - it.transform[5],
+        height: it.height,
+        font: it.fontName,
+      });
+    }
+    const exits = parseExitTable(items);
+    return exits ? { exits } : {};
+  } finally {
+    // The bundled pdf.js types omit destroy(), but the runtime has it.
+    await (pdf as unknown as { destroy?: () => Promise<void> }).destroy?.();
+  }
+}
+
 async function main() {
   await mkdir(join(CACHE, "osm"), { recursive: true });
+  await mkdir(join(CACHE, "guide-maps"), { recursive: true });
   await mkdir(join(OUT, "stations"), { recursive: true });
 
   console.log("HSL GTFS");
@@ -179,6 +246,36 @@ async function main() {
   for (const data of built) {
     data.paths = data.paths.filter((p) => nearest.get(p.entrance)?.station === data.id);
     data.entrances = data.entrances.filter((e) => nearest.get(e.id)?.station === data.id);
+    // Exit sign destinations from the city's station guide map. The exit letters there are
+    // graphics, so the table blocks are lettered in reading order; use them only when the block
+    // count matches the station's lettered exits in OSM.
+    const guide = await guideMap(data.name);
+    let signNote = "no guide map";
+    if (guide) {
+      data.guideMap = guide.url;
+      const letters = new Set(data.entrances.map((e) => e.ref).filter(Boolean));
+      // OSM can miss a letter, so the table may have more blocks than OSM has letters; but an
+      // empty block or an OSM letter beyond the table means the layout was not read right.
+      const exits = guide.exits ?? [];
+      const last = String.fromCharCode(64 + exits.length);
+      // With more blocks than OSM letters, the last block must still be the station's highest
+      // letter; that catches most tables with a skipped letter.
+      const highest = [...letters].toSorted().at(-1);
+      const trusted =
+        exits.length >= letters.size &&
+        exits.every((x) => x.signs.length > 0) &&
+        [...letters].every((l) => (l as string) <= last) &&
+        (exits.length === letters.size || highest === last || CHECKED_TABLES.has(data.name));
+      if (trusted) {
+        for (const e of data.entrances) {
+          const signs = exits.find((x) => x.letter === e.ref)?.signs;
+          if (signs && signs.length > 0) e.signs = signs;
+        }
+        signNote = `signs for ${exits.length} exits`;
+      } else {
+        signNote = `guide map, ${exits.length} table blocks vs ${letters.size} OSM letters: not used`;
+      }
+    }
     await writeFile(join(OUT, "stations", `${data.id}.json`), JSON.stringify(data));
     const withRef = data.entrances.filter((e) => e.ref).length;
     const byProfile = (p: string) => data.paths.filter((x) => x.profile === p).length;
@@ -186,7 +283,7 @@ async function main() {
       `  ${data.name.padEnd(18)} entrances ${data.entrances.length} (${withRef} lettered)` +
         `  platforms ${data.platforms.filter((p) => p.mapped).length}/${data.platforms.length}` +
         `  paths fastest ${byProfile("fastest")} noStairs ${byProfile("noStairs")} stepFree ${byProfile("stepFree")}` +
-        `  indoor ${data.indoor.features.length}`,
+        `  indoor ${data.indoor.features.length}  ${signNote}`,
     );
     index.stations.push({
       id: data.id,

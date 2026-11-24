@@ -29,6 +29,8 @@ export interface StationPath {
   position: number;
   steps: PathStep[];
   line: PathVertex[];
+  /** Named buildings or shopping centres the path goes through. */
+  via?: string[];
 }
 
 export interface Entrance {
@@ -39,6 +41,12 @@ export interface Entrance {
   lat: number;
   level: number | null;
   wheelchair?: string;
+  /** Street the exit opens onto (OSM address, else the nearest named street). */
+  street?: string;
+  /** Named building, shopping centre or square the exit leads into. */
+  place?: string;
+  /** Destinations on the station's exit signs (from the city's station guide map). */
+  signs?: string[];
 }
 
 export interface Platform {
@@ -82,6 +90,8 @@ export interface StationData {
   paths: StationPath[];
   indoor: { type: "FeatureCollection"; features: IndoorFeature[] };
   osmTimestamp: string;
+  /** The City of Helsinki station guide map (PDF), when one exists. */
+  guideMap?: string;
 }
 
 export interface StationIndexEntry {

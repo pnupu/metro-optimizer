@@ -379,6 +379,10 @@ function About({ onClose }: { onClose: () => void }) {
             </li>
             <li>Timetables and stops: HSL open data (CC BY 4.0)</li>
             <li>
+              Exit sign destinations: City of Helsinki metro station guide maps (Helsinki stations;
+              the app links each map)
+            </li>
+            <li>
               Maps and station layouts: ©{" "}
               <a
                 className="underline"

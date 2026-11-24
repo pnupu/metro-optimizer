@@ -16,6 +16,7 @@ import type {
   StationPath,
 } from "./station-types";
 import { PROFILES } from "./station-types";
+import { areaAt, areasAlong, namedAreas, nearestStreet } from "./signs";
 
 export type Tags = Record<string, string>;
 export interface OsmNode {
@@ -31,7 +32,13 @@ export interface OsmWay {
   nodes: number[];
   tags?: Tags;
 }
-export type OsmElement = OsmNode | OsmWay | { type: "relation"; id: number; tags?: Tags };
+export interface OsmRelation {
+  type: "relation";
+  id: number;
+  members?: { type: string; ref: number; role: string }[];
+  tags?: Tags;
+}
+export type OsmElement = OsmNode | OsmWay | OsmRelation;
 
 export interface GtfsPlatform {
   stopId: string;
@@ -174,9 +181,11 @@ export function buildStation(
 ): StationData {
   const nodes = new Map<number, OsmNode>();
   const ways: OsmWay[] = [];
+  const relations: OsmRelation[] = [];
   for (const e of elements) {
     if (e.type === "node") nodes.set(e.id, e);
     else if (e.type === "way") ways.push(e);
+    else relations.push(e);
   }
   const ll = (id: number): LngLat => {
     const n = nodes.get(id);
@@ -240,6 +249,13 @@ export function buildStation(
     [...levelsAt].filter(([id, set]) => set.size > 1 && !elevatorNodes.has(id)).map(([id]) => id),
   );
 
+  // Named buildings, malls and squares, for exit signs and "through X" notes.
+  const maybeLl = (id: number): LngLat | undefined => {
+    const n = nodes.get(id);
+    return n ? [n.lon, n.lat] : undefined;
+  };
+  const areas = namedAreas(ways, relations, maybeLl);
+
   // Entrances. Snap an entrance that is not on a way to the nearest graph node.
   const graphIds = [...graph.keys()];
   const entrances: Entrance[] = [];
@@ -261,6 +277,8 @@ export function buildStation(
     }
     const id = String(n.id);
     entranceNode.set(id, at);
+    const street = t["addr:street"] ?? nearestStreet([n.lon, n.lat], ways, maybeLl);
+    const place = areaAt([n.lon, n.lat], areas);
     entrances.push({
       id,
       ...(t.ref ? { ref: t.ref } : {}),
@@ -269,6 +287,8 @@ export function buildStation(
       lat: n.lat,
       level: nodeLevel.get(n.id) ?? parseLevels(t.level)[0] ?? 0,
       ...(t.wheelchair ? { wheelchair: t.wheelchair } : {}),
+      ...(street ? { street } : {}),
+      ...(place && place !== street ? { place } : {}),
     });
   }
 
@@ -393,6 +413,13 @@ export function buildStation(
           position: Number(projectFraction(ll(target), ...platform.axis).toFixed(3)),
           steps: result.steps,
           line: result.line,
+          ...(() => {
+            const via = areasAlong(
+              result.line.map(([lng, lat]) => [lng, lat] as LngLat),
+              areas,
+            );
+            return via.length > 0 ? { via } : {};
+          })(),
         });
       }
     }
