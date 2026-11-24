@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { StationData, StationIndex } from "./station-types";
+import type { WalkGraph } from "./walk-graph";
 
 const base = `${import.meta.env.BASE_URL}data`;
 /**
@@ -57,4 +58,35 @@ export function useStationIndex(): StationIndex | undefined {
     void loadIndex().then(setIndex, () => undefined);
   }, []);
   return index;
+}
+
+const graphPromises = new Map<string, Promise<WalkGraph | undefined>>();
+
+/** A station's walking network, for routing to shops inside joined buildings. */
+export function loadGraph(id: string): Promise<WalkGraph | undefined> {
+  let p = graphPromises.get(id);
+  if (!p) {
+    p = fetch(`${base}/stations/${id}.graph.json?v=${DATA_VERSION}`)
+      .then((r) => (r.ok ? (r.json() as Promise<WalkGraph>) : undefined))
+      .catch(() => undefined);
+    graphPromises.set(id, p);
+  }
+  return p;
+}
+
+export function useGraphs(ids: string[]): Map<string, WalkGraph> {
+  const [loaded, setLoaded] = useState(() => new Map<string, WalkGraph>());
+  const key = [...new Set(ids)].toSorted().join(",");
+  useEffect(() => {
+    let live = true;
+    const wanted = key ? key.split(",") : [];
+    void Promise.all(wanted.map(async (id) => [id, await loadGraph(id)] as const)).then((list) => {
+      if (!live) return;
+      setLoaded(new Map(list.filter((x): x is readonly [string, WalkGraph] => !!x[1])));
+    });
+    return () => {
+      live = false;
+    };
+  }, [key]);
+  return loaded;
 }

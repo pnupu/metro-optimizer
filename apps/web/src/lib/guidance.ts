@@ -2,7 +2,14 @@
  * Station guidance for the metro legs of an itinerary: which entrance or exit to use, how to
  * get between the street and the platform, and which end of the train to board.
  */
-import { angleBetween, bearing, cumulative, decodePolyline, distance } from "./geo";
+import {
+  angleBetween,
+  bearing,
+  cumulative,
+  decodePolyline,
+  distance,
+  projectFraction,
+} from "./geo";
 import type { Leg, Place } from "./transitous";
 import { gtfsId } from "./transitous";
 import type {
@@ -16,6 +23,7 @@ import type {
   StationPath,
 } from "./station-types";
 import { ELEVATOR_SECONDS } from "./station-types";
+import { cheapest, type GraphPoi, pathTo, search, type WalkGraph } from "./walk-graph";
 
 export type TrainEnd = "front" | "middle" | "back";
 
@@ -39,6 +47,8 @@ export interface StationGuide {
   uncertain: boolean;
   /** True when the train runs from the platform axis start toward its end. */
   alongAxis: boolean;
+  /** Set when the path goes straight to (or comes from) a shop or place inside the building. */
+  poi?: GraphPoi;
 }
 
 export interface MetroGuide {
@@ -213,7 +223,118 @@ export function trainEndPoint(guide: StationGuide, end: TrainEnd): LngLat {
 export const legLine = (leg: Leg): LngLat[] =>
   decodePolyline(leg.legGeometry.points, leg.legGeometry.precision);
 
-export function guideItinerary(legs: Leg[], profile: Profile, lookup: StationLookup): MetroGuide[] {
+/** Where the trip starts and ends, and the station walking networks loaded so far. */
+export interface TripEnds {
+  from?: { lat: number; lon: number; label?: string };
+  to?: { lat: number; lon: number; label?: string };
+  graph: (stationId: string) => WalkGraph | undefined;
+}
+
+/**
+ * The shop or place a trip end points at, when it lies in a station's walking network: the
+ * nearest one with the same name within 35 m, else the nearest street-level one within 12 m (a
+ * point on the pavement must not send the rider to a shop on another floor).
+ */
+export function findPoi(
+  graph: WalkGraph,
+  end: { lat: number; lon: number; label?: string },
+): GraphPoi | undefined {
+  const label = end.label?.toLowerCase().trim();
+  let named: GraphPoi | undefined;
+  let namedD = 35;
+  let nearest: GraphPoi | undefined;
+  let nearestD = 12;
+  for (const p of graph.pois) {
+    const d = distance([p.lng, p.lat], [end.lon, end.lat]);
+    const same = label && (p.name.toLowerCase() === label || p.local?.toLowerCase() === label);
+    if (same && d < namedD) {
+      namedD = d;
+      named = p;
+    }
+    if (p.level === 0 && d < nearestD) {
+      nearestD = d;
+      nearest = p;
+    }
+  }
+  return named ?? nearest;
+}
+
+/** An indoor path may cross a few metres with no floor tag (a door, a gap in the data). */
+const MAX_OUTDOOR_METERS = 30;
+/** Longer "indoor" paths are data errors or another building. */
+const MAX_INDOOR_METERS = 650;
+
+/** A path inside the building between the platform and a shop, as a station guide. */
+export function guideToPoi(
+  station: StationData,
+  graph: WalkGraph,
+  place: Place,
+  poi: GraphPoi,
+  profile: Profile,
+  direction: "in" | "out",
+  travel: number | undefined,
+): StationGuide | undefined {
+  const platform =
+    station.platforms.find((p) => p.stopId === gtfsId(place.stopId)) ??
+    station.platforms.find((p) => p.code === place.stopCode);
+  const nodes = graph.platforms.find((p) => p.code === platform?.code)?.nodes ?? [];
+  if (!platform || nodes.length === 0) return undefined;
+  // No indoor path for this profile (step-free, no stairs): use the street route, which can
+  // use a lift entrance, rather than show an indoor path with stairs.
+  const found = search(graph, direction === "out" ? nodes : [poi.node], profile);
+  const target = direction === "out" ? poi.node : cheapest(found, nodes);
+  if (target === undefined || !Number.isFinite(found.cost[target] as number)) return undefined;
+  const result = pathTo(found, target, direction === "out" ? platform.level : poi.level);
+  // Only a path that really stays inside replaces the street walk.
+  if (result.outdoorMeters > MAX_OUTDOOR_METERS || result.meters > MAX_INDOOR_METERS)
+    return undefined;
+  const fallback = false;
+  // The search runs from where you start, so the line is already in walking order.
+  const line = result.line;
+  const touch = (direction === "out" ? line[0] : line.at(-1)) as PathVertex;
+  const position = projectFraction([touch[0], touch[1]], ...platform.axis);
+  const entrance: Entrance = {
+    id: `poi:${poi.node}`,
+    name: poi.name,
+    lng: poi.lng,
+    lat: poi.lat,
+    level: poi.level,
+  };
+  const path: StationPath = {
+    entrance: entrance.id,
+    platform: platform.code,
+    profile,
+    meters: Math.round(result.meters),
+    seconds: Math.round(result.seconds),
+    position,
+    steps: result.steps,
+    line,
+  };
+  return {
+    station,
+    platform,
+    entrance,
+    path,
+    steps: result.steps,
+    line,
+    direction,
+    trainPosition: travel === undefined ? 0.5 : trainPosition(platform, travel, position),
+    alongAxis:
+      travel === undefined ||
+      angleBetween(bearing(platform.axis[0], platform.axis[1]), travel) <= 90,
+    profile,
+    fallback,
+    uncertain: result.steps.some((s) => s.mode === "level"),
+    poi,
+  };
+}
+
+export function guideItinerary(
+  legs: Leg[],
+  profile: Profile,
+  lookup: StationLookup,
+  ends?: TripEnds,
+): MetroGuide[] {
   const guides: MetroGuide[] = [];
   legs.forEach((leg, i) => {
     if (leg.mode !== "SUBWAY") return;
@@ -223,7 +344,30 @@ export function guideItinerary(legs: Leg[], profile: Profile, lookup: StationLoo
     const guide: MetroGuide = { legIndex: i };
 
     const boardStation = lookup(gtfsId(leg.from.parentId) ?? "");
-    if (boardStation && before?.mode !== "SUBWAY") {
+    // A trip that starts inside a building joined to the station: walk from the shop indoors.
+    const startPoi =
+      boardStation && ends?.from && (i === 0 || (i === 1 && before?.mode === "WALK"))
+        ? (() => {
+            const g = ends.graph(boardStation.id);
+            const poi = g && ends.from ? findPoi(g, ends.from) : undefined;
+            return g && poi ? { g, poi } : undefined;
+          })()
+        : undefined;
+    const indoorStart = startPoi
+      ? guideToPoi(
+          boardStation as StationData,
+          startPoi.g,
+          leg.from,
+          startPoi.poi,
+          profile,
+          "in",
+          travelBearing(line, "start"),
+        )
+      : undefined;
+    if (indoorStart) {
+      guide.board = indoorStart;
+      guide.boardEnd = endOf(indoorStart.trainPosition);
+    } else if (boardStation && before?.mode !== "SUBWAY") {
       // Street side: the walk to the station, else the stop where the previous ride ends.
       const arrive = before ? before.to : leg.from;
       const walk = before?.mode === "WALK" ? legLine(before) : [[arrive.lon, arrive.lat] as LngLat];
@@ -234,7 +378,30 @@ export function guideItinerary(legs: Leg[], profile: Profile, lookup: StationLoo
       }
     }
     const alightStation = lookup(gtfsId(leg.to.parentId) ?? "");
-    if (alightStation && after?.mode !== "SUBWAY") {
+    const last = legs.length - 1;
+    const endPoi =
+      alightStation && ends?.to && (i === last || (i === last - 1 && after?.mode === "WALK"))
+        ? (() => {
+            const g = ends.graph(alightStation.id);
+            const poi = g && ends.to ? findPoi(g, ends.to) : undefined;
+            return g && poi ? { g, poi } : undefined;
+          })()
+        : undefined;
+    const indoorEnd = endPoi
+      ? guideToPoi(
+          alightStation as StationData,
+          endPoi.g,
+          leg.to,
+          endPoi.poi,
+          profile,
+          "out",
+          travelBearing(line, "end"),
+        )
+      : undefined;
+    if (indoorEnd) {
+      guide.alight = indoorEnd;
+      guide.trainEnd = endOf(indoorEnd.trainPosition);
+    } else if (alightStation && after?.mode !== "SUBWAY") {
       const leave = after ? after.from : leg.to;
       const walk = after?.mode === "WALK" ? legLine(after) : [[leave.lon, leave.lat] as LngLat];
       const g = guideFor(alightStation, leg.to, profile, walk, "out", travelBearing(line, "end"));
@@ -301,8 +468,13 @@ export function exitSign(
   return { title, short, signs, ...(where ? { where } : {}) };
 }
 
-/** "entrance B", or "the exit" when the entrance has no letter. */
-export const entranceShort = (e: Entrance) => (e.ref ? `exit ${e.ref}` : "the exit");
+/** "exit B"; a shop's name for a path that ends at a shop; "the exit" with no letter. */
+export const entranceShort = (e: Entrance) =>
+  e.id.startsWith("poi:") ? (e.name ?? "your destination") : e.ref ? `exit ${e.ref}` : "the exit";
+
+/** "Dif Döner & Dizza (floor M)". */
+export const poiLabel = (p: GraphPoi) =>
+  `${p.name} (${p.floor ? `floor ${p.floor}` : levelName(p.level)})`;
 
 /** One stop of the floor-by-floor walkthrough on the map. */
 export interface WalkItem {
@@ -341,20 +513,29 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
     text:
       guide.direction === "in"
         ? `Platform (${levelName(guide.platform.level)}): follow signs for trains${toward ? ` toward ${toward}` : ""}${trainEnd && trainEnd !== endOf(guide.trainPosition) ? ` and walk to the ${trainEnd}` : ""}`
-        : `Get off at the ${trainEnd ?? "nearest door"}, then follow signs for ${sign.short}`,
+        : guide.poi
+          ? `Get off at the ${trainEnd ?? "nearest door"}, then head for ${poiLabel(guide.poi)}`
+          : `Get off at the ${trainEnd ?? "nearest door"}, then follow signs for ${sign.short}`,
     level: guide.platform.level,
     points: platformPoints,
     kind: "platform",
   };
-  const door: WalkItem = {
-    text:
-      guide.direction === "in"
-        ? `${sign.title}${sign.where ? ` · ${sign.where}` : ""}: go in here`
-        : `${sign.title}: you come out at ${sign.where ?? "street level"}`,
-    level: guide.entrance.liftTo ?? guide.entrance.level,
-    points: [entrance],
-    kind: "entrance",
-  };
+  const door: WalkItem = guide.poi
+    ? {
+        text: `${guide.direction === "in" ? "Start at" : "Arrive at"} ${poiLabel(guide.poi)}`,
+        level: guide.poi.level,
+        points: [entrance],
+        kind: guide.direction === "in" ? "entrance" : "arrive",
+      }
+    : {
+        text:
+          guide.direction === "in"
+            ? `${sign.title}${sign.where ? ` · ${sign.where}` : ""}: go in here`
+            : `${sign.title}: you come out at ${sign.where ?? "street level"}`,
+        level: guide.entrance.liftTo ?? guide.entrance.level,
+        points: [entrance],
+        kind: "entrance",
+      };
   // Say where each walk leads: the next floor change, the platform, or the exit.
   const target = (next: PathStep | undefined) => {
     if (!next) return guide.direction === "in" ? "the platform" : entranceShort(guide.entrance);

@@ -8,7 +8,7 @@ import { MapView } from "@/components/map-view";
 import { PlaceInput, type PlaceValue } from "@/components/place-input";
 import { guideItinerary, type MetroGuide, type WalkItem } from "@/lib/guidance";
 import type { Profile } from "@/lib/station-types";
-import { useStationIndex, useStations } from "@/lib/stations";
+import { useGraphs, useStationIndex, useStations } from "@/lib/stations";
 import { gtfsId, type Itinerary, type Place, plan } from "@/lib/transitous";
 
 const search = z.object({
@@ -111,9 +111,32 @@ function Planner() {
     [itineraries],
   );
   const stations = useStations(metroIds);
+  // Walking networks of the first boarding and last alighting stations: a trip end may be a
+  // shop inside a building joined to the station.
+  const endStationIds = useMemo(
+    () =>
+      itineraries
+        .flatMap((it) => {
+          const metro = it.legs.filter((l) => l.mode === "SUBWAY");
+          return [
+            stationIdOf(metro[0]?.from ?? ({} as Place)),
+            stationIdOf(metro.at(-1)?.to ?? ({} as Place)),
+          ];
+        })
+        .filter((id): id is string => !!id),
+    [itineraries],
+  );
+  const graphs = useGraphs(endStationIds);
   const guides = useMemo<MetroGuide[][]>(
-    () => itineraries.map((it) => guideItinerary(it.legs, profile, (id) => stations.get(id))),
-    [itineraries, profile, stations],
+    () =>
+      itineraries.map((it) =>
+        guideItinerary(it.legs, profile, (id) => stations.get(id), {
+          ...(from ? { from: { lat: from.lat, lon: from.lon, label: from.label } } : {}),
+          ...(to ? { to: { lat: to.lat, lon: to.lon, label: to.label } } : {}),
+          graph: (id) => graphs.get(id),
+        }),
+      ),
+    [itineraries, profile, stations, graphs, from, to],
   );
   const nameOf = useCallback(
     (p: Place) => {

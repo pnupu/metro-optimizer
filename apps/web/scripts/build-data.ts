@@ -15,6 +15,7 @@ import { getDocumentProxy } from "unpdf";
 import { type ExitSigns, parseExitTable, type TextItem } from "../src/lib/exit-table";
 import { buildStation, type GtfsStation, type OsmElement } from "../src/lib/station-graph";
 import type { StationData, StationIndex } from "../src/lib/station-types";
+import type { WalkGraph } from "../src/lib/walk-graph";
 
 const ROOT = join(import.meta.dir, "..");
 const CACHE = join(ROOT, ".cache");
@@ -214,7 +215,7 @@ async function main() {
   );
 
   const index: StationIndex = { generated: new Date().toISOString(), stations: [] };
-  const built: StationData[] = [];
+  const built: (StationData & { graph: WalkGraph })[] = [];
   for (const station of stations) {
     const bbox = [
       station.lon - BOX.lon,
@@ -276,7 +277,9 @@ async function main() {
         signNote = `guide map, ${exits.length} table blocks vs ${letters.size} OSM letters: not used`;
       }
     }
-    await writeFile(join(OUT, "stations", `${data.id}.json`), JSON.stringify(data));
+    const { graph, ...station } = data;
+    await writeFile(join(OUT, "stations", `${data.id}.json`), JSON.stringify(station));
+    await writeFile(join(OUT, "stations", `${data.id}.graph.json`), JSON.stringify(graph));
     const withRef = data.entrances.filter((e) => e.ref).length;
     const byProfile = (p: string) => data.paths.filter((x) => x.profile === p).length;
     console.log(

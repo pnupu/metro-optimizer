@@ -8,15 +8,14 @@ import type {
   IndoorFeature,
   LngLat,
   Mode,
-  PathStep,
   PathVertex,
   Platform,
-  Profile,
   StationData,
   StationPath,
 } from "./station-types";
 import { ELEVATOR_SECONDS, PROFILES } from "./station-types";
 import { areaAt, areaPolygons, areasAlong, namedAreas, nearestStreet } from "./signs";
+import { cheapest, MODES, pathTo, search, type WalkGraph } from "./walk-graph";
 
 export type Tags = Record<string, string>;
 export interface OsmNode {
@@ -92,11 +91,6 @@ const WALKABLE = new Set([
   "track",
 ]);
 
-const SPEED = { walk: 1.3, stairs: 0.55, escalator: 0.9, elevator: 1, level: 1 } as const;
-/** Extra cost of a level change that OSM does not describe, seconds. */
-const UNKNOWN_LEVEL_SECONDS = 20;
-/** Fixed cost of one elevator ride (wait + ride), seconds. */
-// Shared with the app, which adds a lift ride at lift entrances.
 /** Paths longer than this belong to another station or are data errors. */
 const MAX_PATH_METERS = 650;
 
@@ -124,61 +118,11 @@ interface Edge {
   noWheelchair: boolean;
 }
 
-function allowed(e: Edge, profile: Profile): boolean {
-  if (profile === "fastest") return true;
-  if (e.mode === "stairs") return false;
-  if (profile === "stepFree")
-    return e.mode !== "escalator" && e.mode !== "level" && !e.noWheelchair;
-  return true;
-}
-
-class MinHeap {
-  private a: [number, number][] = [];
-  get size() {
-    return this.a.length;
-  }
-  push(item: [number, number]) {
-    const a = this.a;
-    a.push(item);
-    let i = a.length - 1;
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if ((a[p] as [number, number])[0] <= item[0]) break;
-      a[i] = a[p] as [number, number];
-      i = p;
-    }
-    a[i] = item;
-  }
-  pop(): [number, number] | undefined {
-    const a = this.a;
-    const top = a[0];
-    const last = a.pop();
-    if (a.length === 0 || !last) return top;
-    let i = 0;
-    for (;;) {
-      const l = 2 * i + 1;
-      const r = l + 1;
-      let smallest = last[0];
-      let m = -1;
-      if (l < a.length && (a[l] as [number, number])[0] < smallest) {
-        m = l;
-        smallest = (a[l] as [number, number])[0];
-      }
-      if (r < a.length && (a[r] as [number, number])[0] < smallest) m = r;
-      if (m === -1) break;
-      a[i] = a[m] as [number, number];
-      i = m;
-    }
-    a[i] = last;
-    return top;
-  }
-}
-
 export function buildStation(
   station: GtfsStation,
   elements: OsmElement[],
   osmTimestamp: string,
-): StationData {
+): StationData & { graph: WalkGraph } {
   const nodes = new Map<number, OsmNode>();
   const ways: OsmWay[] = [];
   const relations: OsmRelation[] = [];
@@ -362,65 +306,33 @@ export function buildStation(
     });
   }
 
-  // Dijkstra from each entrance, for each profile.
+  // The compact walking network: the part connected to the platforms.
+  const wg = toWalkGraph(graph, nodes, nodeLevel, elevatorNodes, jumpNodes, platformNodes, ways);
+  const index = new Map(wg.ids.map((id, k) => [id, k]));
+
+  // Cheapest path from each entrance to each platform, for each profile.
   const paths: StationPath[] = [];
   for (const entrance of entrances) {
-    const source = entranceNode.get(entrance.id) as number;
+    const source = index.get(entranceNode.get(entrance.id) as number);
+    if (source === undefined) continue;
     for (const profile of PROFILES) {
-      const dist = new Map<number, number>([[source, 0]]);
-      const prev = new Map<number, { from: number; edge: Edge }>();
-      const heap = new MinHeap();
-      heap.push([0, source]);
-      while (heap.size > 0) {
-        const [c, u] = heap.pop() as [number, number];
-        if (c > (dist.get(u) ?? Infinity)) continue;
-        for (const e of graph.get(u) ?? []) {
-          if (!allowed(e, profile)) continue;
-          const jump = jumpNodes.has(e.to);
-          // An undescribed level change can be stairs: never use it for step-free paths.
-          if (jump && profile === "stepFree") continue;
-          let cost = e.meters / SPEED[e.mode];
-          if (elevatorNodes.has(e.to) && !elevatorNodes.has(u)) cost += ELEVATOR_SECONDS;
-          if (jump) cost += UNKNOWN_LEVEL_SECONDS;
-          const nc = c + cost;
-          if (nc < (dist.get(e.to) ?? Infinity)) {
-            dist.set(e.to, nc);
-            prev.set(e.to, { from: u, edge: e });
-            heap.push([nc, e.to]);
-          }
-        }
-      }
+      const found = search(wg.graph, [source], profile);
       for (const platform of platforms) {
-        const ids = platformNodes.get(platform.code);
-        if (!ids) continue;
-        let target: number | undefined;
-        let best = Infinity;
-        for (const id of ids) {
-          const d = dist.get(id) ?? Infinity;
-          if (d < best) {
-            best = d;
-            target = id;
-          }
-        }
+        const targets = wg.graph.platforms.find((p) => p.code === platform.code)?.nodes ?? [];
+        const target = cheapest(found, targets);
         if (target === undefined) continue;
-        const chain: { node: number; edge?: Edge }[] = [];
-        for (let x: number | undefined = target; x !== undefined;) {
-          const p = prev.get(x);
-          chain.push({ node: x, ...(p ? { edge: p.edge } : {}) });
-          x = p?.from;
-        }
-        chain.reverse();
-        const result = summarize(chain, nodeLevel, elevatorNodes, ll, entrance.level);
+        const result = pathTo(found, target, entrance.level);
         // A lift entrance adds a ride the graph search does not see (the path starts inside it).
         const liftSeconds = entrance.liftTo === undefined ? 0 : ELEVATOR_SECONDS;
         if (result.meters > MAX_PATH_METERS) continue;
+        const [tlng, tlat] = wg.graph.nodes[target] as PathVertex;
         paths.push({
           entrance: entrance.id,
           platform: platform.code,
           profile,
           meters: Math.round(result.meters),
-          seconds: Math.round(best + liftSeconds),
-          position: Number(projectFraction(ll(target), ...platform.axis).toFixed(3)),
+          seconds: Math.round(result.seconds + liftSeconds),
+          position: Number(projectFraction([tlng, tlat], ...platform.axis).toFixed(3)),
           steps: result.steps,
           line: result.line,
           ...(() => {
@@ -466,78 +378,115 @@ export function buildStation(
     paths,
     indoor: { type: "FeatureCollection", features: indoor },
     osmTimestamp,
+    graph: wg.graph,
   };
 }
 
-function summarize(
-  chain: { node: number; edge?: Edge }[],
+/**
+ * The walking network as compact arrays: the part reachable from the platforms, with named
+ * shops and amenities that have a floor, snapped to a walkway on that floor.
+ */
+function toWalkGraph(
+  graph: Map<number, Edge[]>,
+  nodes: Map<number, OsmNode>,
   nodeLevel: Map<number, number>,
   elevatorNodes: Set<number>,
-  ll: (id: number) => LngLat,
-  startLevel: number | null,
-): { meters: number; steps: PathStep[]; line: PathVertex[] } {
-  const line: PathVertex[] = [];
-  const steps: PathStep[] = [];
-  let level: number | null = startLevel;
-  let meters = 0;
-  let viaElevator = false;
-  const round = (n: number) => Math.round(n * 1e6) / 1e6;
-  for (let i = 0; i < chain.length; i++) {
-    const { node, edge } = chain[i] as { node: number; edge?: Edge };
-    const before = level;
-    const known = nodeLevel.get(node);
-    if (known !== undefined) level = known;
-    const [lng, lat] = ll(node);
-    line.push([round(lng), round(lat), level]);
-    const prevNode = chain[i - 1]?.node;
-    if (prevNode !== undefined && elevatorNodes.has(prevNode)) viaElevator = true;
-    if (!edge) continue;
-    meters += edge.meters;
-    let from = before;
-    let start = i - 1;
-    // A level change on a horizontal way: an elevator (a point in OSM) or an undescribed change.
-    if (edge.mode === "walk" && before !== null && level !== null && before !== level) {
-      const elevator = viaElevator || elevatorNodes.has(node);
-      steps.push({
-        mode: elevator ? "elevator" : "level",
-        fromLevel: before,
-        toLevel: level,
-        meters: 0,
-        seconds: elevator ? ELEVATOR_SECONDS : UNKNOWN_LEVEL_SECONDS,
-        a: i - 1,
-        b: i - 1,
-      });
-      viaElevator = false;
-      from = level;
-      // The walk after the change starts on the new floor, not at the vertex before it.
-      start = i;
-    } else if (edge.mode !== "walk") {
-      viaElevator = false;
-    }
-    const last = steps.at(-1);
-    const seconds = edge.meters / SPEED[edge.mode];
-    if (last && last.mode === edge.mode && (edge.mode === "walk" || last.toLevel === from)) {
-      last.meters += edge.meters;
-      last.seconds += seconds;
-      last.toLevel = level;
-      last.b = i;
-    } else {
-      steps.push({
-        mode: edge.mode,
-        fromLevel: from,
-        toLevel: level,
-        meters: edge.meters,
-        seconds,
-        a: start,
-        b: i,
-      });
+  jumpNodes: Set<number>,
+  platformNodes: Map<string, number[]>,
+  ways: OsmWay[],
+): { graph: WalkGraph; ids: number[] } {
+  const seen = new Set<number>();
+  const queue = [...platformNodes.values()].flat().filter((id) => graph.has(id));
+  for (const id of queue) seen.add(id);
+  while (queue.length > 0) {
+    const u = queue.pop() as number;
+    for (const e of graph.get(u) ?? []) {
+      if (!seen.has(e.to)) {
+        seen.add(e.to);
+        queue.push(e.to);
+      }
     }
   }
-  for (const s of steps) {
-    s.meters = Math.round(s.meters);
-    s.seconds = Math.round(s.seconds);
+  const ids = [...seen];
+  const index = new Map(ids.map((id, k) => [id, k]));
+  const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
+  const out: WalkGraph = {
+    nodes: ids.map((id) => {
+      const n = nodes.get(id) as OsmNode;
+      return [r6(n.lon), r6(n.lat), nodeLevel.get(id) ?? null];
+    }),
+    edges: [],
+    elevators: ids.filter((id) => elevatorNodes.has(id)).map((id) => index.get(id) as number),
+    jumps: ids.filter((id) => jumpNodes.has(id)).map((id) => index.get(id) as number),
+    platforms: [...platformNodes].map(([code, list]) => ({
+      code,
+      nodes: list.map((id) => index.get(id)).filter((k): k is number => k !== undefined),
+    })),
+    pois: [],
+  };
+  for (const [a, list] of graph) {
+    const ia = index.get(a);
+    if (ia === undefined) continue;
+    for (const e of list) {
+      const ib = index.get(e.to);
+      if (ib === undefined || ib < ia) continue;
+      out.edges.push([
+        ia,
+        ib,
+        Math.max(1, Math.round(e.meters * 10)),
+        MODES.indexOf(e.mode),
+        e.noWheelchair ? 1 : 0,
+      ]);
+    }
   }
-  return { meters, steps, line };
+  // Places people travel to: named shops and amenities with a floor.
+  const candidates: {
+    name: string;
+    local?: string;
+    level: number;
+    floor?: string;
+    lng: number;
+    lat: number;
+  }[] = [];
+  const add = (t: Tags, lng: number, lat: number) => {
+    const name = t["name:en"] ?? t.name;
+    const local = t["name:en"] && t.name && t.name !== t["name:en"] ? t.name : undefined;
+    const level = parseLevels(t.level);
+    if (!name || level.length !== 1 || !(t.shop || t.amenity || t.office || t.leisure)) return;
+    candidates.push({
+      name,
+      ...(local ? { local } : {}),
+      level: level[0] as number,
+      ...(t["level:ref"] ? { floor: t["level:ref"] } : {}),
+      lng,
+      lat,
+    });
+  };
+  for (const n of nodes.values()) if (n.tags) add(n.tags, n.lon, n.lat);
+  for (const w of ways) {
+    if (!w.tags || w.nodes[0] !== w.nodes.at(-1)) continue;
+    const pts = w.nodes.map((id) => nodes.get(id)).filter((n): n is OsmNode => !!n);
+    if (pts.length < 3) continue;
+    add(
+      w.tags,
+      pts.reduce((s, n) => s + n.lon, 0) / pts.length,
+      pts.reduce((s, n) => s + n.lat, 0) / pts.length,
+    );
+  }
+  for (const c of candidates) {
+    let best = -1;
+    let bestD = 40;
+    out.nodes.forEach(([lng, lat, lv], k) => {
+      if (lv !== c.level) return;
+      const d = distance([lng, lat], [c.lng, c.lat]);
+      if (d < bestD) {
+        bestD = d;
+        best = k;
+      }
+    });
+    if (best >= 0) out.pois.push({ ...c, lng: r6(c.lng), lat: r6(c.lat), node: best });
+  }
+  return { graph: out, ids };
 }
 
 const AREA_KINDS = new Set(["room", "area", "corridor", "level"]);

@@ -22,6 +22,7 @@ import {
   entranceShort,
   exitSign,
   levelName,
+  poiLabel,
   type WalkItem,
 } from "@/lib/guidance";
 import { tripWalkthrough } from "@/lib/trip-walk";
@@ -188,15 +189,24 @@ function StationCard({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-muted-foreground text-xs uppercase tracking-wide">
-            {direction === "in" ? "Into" : "Out of"} {station.name} station
+            {guide.poi
+              ? `${direction === "in" ? "From" : "To"} ${guide.poi.name} · inside, via ${station.name} station`
+              : `${direction === "in" ? "Into" : "Out of"} ${station.name} station`}
           </div>
           <div className="mt-0.5 flex items-center gap-2 font-semibold">
             <span className="grid size-6 shrink-0 place-items-center rounded-full bg-[#ff6319] text-white text-xs">
               {entrance.ref ?? "M"}
             </span>
-            {sign.title}
+            {guide.poi ? guide.poi.name : sign.title}
           </div>
-          {sign.where && <div className="mt-0.5 text-muted-foreground text-sm">{sign.where}</div>}
+          {guide.poi ? (
+            <div className="mt-0.5 text-muted-foreground text-sm">
+              {guide.poi.floor ? `Floor ${guide.poi.floor}` : levelName(guide.poi.level)} · no need
+              to go outside
+            </div>
+          ) : (
+            sign.where && <div className="mt-0.5 text-muted-foreground text-sm">{sign.where}</div>
+          )}
         </div>
         <button
           type="button"
@@ -213,7 +223,9 @@ function StationCard({
               Leave the train at the {platformEnd}
             </Row>
             <Row icon={signpost}>
-              <strong>Follow signs for {sign.short}</strong>
+              <strong>
+                {guide.poi ? `Head for ${poiLabel(guide.poi)}` : `Follow signs for ${sign.short}`}
+              </strong>
               {sign.signs.length > 2 && (
                 <span className="block text-muted-foreground text-xs">
                   The exit {entrance.ref} signs also list {sign.signs.slice(2).join(", ")}.
@@ -256,7 +268,7 @@ function StationCard({
             Through {[...via].reverse().join(", then ")}
           </Row>
         )}
-        {direction === "out" && sign.where && (
+        {direction === "out" && !guide.poi && sign.where && (
           <Row icon={<DoorOpen className="size-4 shrink-0" aria-hidden />} muted>
             You come out at {sign.where}
           </Row>
@@ -323,7 +335,24 @@ export function ItineraryDetail({
           className="absolute top-8 bottom-0 left-[11px] w-0.5"
           style={{ background: modeColor(leg.mode), opacity: 0.35 }}
         />
-        {leg.mode === "WALK" ? (
+        {leg.mode === "WALK" && (byLeg.get(i - 1)?.alight?.poi || byLeg.get(i + 1)?.board?.poi) ? (
+          <div className="text-muted-foreground text-sm">
+            {byLeg.get(i + 1)?.board?.poi
+              ? `Start inside, at ${byLeg.get(i + 1)?.board?.poi?.name}: the station steps below take you to the platform.`
+              : `Stay inside: the steps above take you to ${byLeg.get(i - 1)?.alight?.poi?.name}.`}
+            {byLeg.get(i + 1)?.board?.poi && nextMetro?.board && (
+              <StationCard
+                guide={nextMetro.board}
+                direction="in"
+                trainEnd={nextMetro.trainEnd}
+                {...(itinerary.legs[i + 1]?.headsign
+                  ? { toward: itinerary.legs[i + 1]?.headsign }
+                  : {})}
+                walk={walkAt(nextMetro.board)}
+              />
+            )}
+          </div>
+        ) : leg.mode === "WALK" ? (
           <div>
             <div className="font-medium">
               Walk {minutes(leg.duration)}

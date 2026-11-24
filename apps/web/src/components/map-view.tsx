@@ -838,8 +838,11 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     const features: GeoJSON.Feature[] = (itinerary?.legs ?? []).map((leg, i) => {
       const exit = byLeg.get(i - 1)?.alight?.entrance;
       const entrance = byLeg.get(i + 1)?.board?.entrance;
-      const coordinates =
-        leg.mode === "WALK" && (exit || entrance)
+      // The indoor path to a shop replaces the street walk entirely.
+      const indoor = byLeg.get(i - 1)?.alight?.poi || byLeg.get(i + 1)?.board?.poi;
+      const coordinates = indoor
+        ? []
+        : leg.mode === "WALK" && (exit || entrance)
           ? walkGeometry(
               leg,
               exit ? [exit.lng, exit.lat] : undefined,
@@ -871,7 +874,9 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
       // The board / get-off pin marks the train end on the platform, not where the path arrives.
       const platformPoint = end ? trainEndPoint(guide, end) : out ? line[0] : line.at(-1);
       const exitPoint = out ? line.at(-1) : line[0];
-      const sign = exitSign(guide.entrance, out ? "out" : "in");
+      const sign = guide.poi
+        ? { title: guide.poi.name }
+        : exitSign(guide.entrance, out ? "out" : "in");
       const pin = (p: typeof platformPoint, label: string): GeoJSON.Feature[] =>
         p
           ? [

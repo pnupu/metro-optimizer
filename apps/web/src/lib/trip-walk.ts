@@ -155,6 +155,8 @@ export function tripWalkthrough(
       }
       const before = byLeg.get(i - 1);
       const after = byLeg.get(i + 1);
+      // The station path already goes indoors to (or from) the shop: no street walk.
+      if (before?.alight?.poi || after?.board?.poi) return;
       const exit = before?.alight?.entrance;
       const entrance = after?.board?.entrance;
       const chunks = mergeShort(
@@ -211,7 +213,10 @@ export function tripWalkthrough(
   });
 
   const end = legs[lastLeg]?.to;
-  if (end) {
+  // A path that ends at a shop already says "Arrive at …": add the time to it.
+  const lastItem = items.at(-1);
+  if (lastItem?.kind === "arrive") lastItem.text = `${lastItem.text} (${time(itinerary.endTime)})`;
+  else if (end) {
     items.push({
       text: `Arrive at your destination (${time(itinerary.endTime)})`,
       level: 0,
