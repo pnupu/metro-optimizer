@@ -15,6 +15,7 @@ import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import type { WalkItem } from "@/lib/guidance";
 import { exitSign, legLine, levelName, trainEndPoint } from "@/lib/guidance";
 import type { LngLat, StationData } from "@/lib/station-types";
+import { build3d, lowestFloor } from "@/lib/indoor-3d";
 import { DATA_VERSION, loadStation, useStationIndex } from "@/lib/stations";
 import { walkGeometry } from "@/lib/trip-walk";
 import type { Itinerary } from "@/lib/transitous";
@@ -121,6 +122,26 @@ export const INDOOR_COLORS = {
   platform: "#ffb38f",
 };
 
+/** 2D indoor layers that the 3D view replaces. */
+const FLAT_INDOOR_LAYERS = [
+  "indoor-area",
+  "indoor-outline",
+  "indoor-line-casing",
+  "indoor-line",
+  "indoor-vertical",
+  "indoor-vertical-label",
+  "indoor-elevator",
+  "indoor-elevator-label",
+  "indoor-room-label",
+  "indoor-poi",
+  "station-path-casing",
+  "station-path",
+  "station-path-arrows",
+  "walk-active-casing",
+  "walk-active-line",
+  "walk-active-point",
+];
+
 const levelFilter = (level: number): maplibregl.FilterSpecification => [
   "all",
   ["<=", ["get", "lmin"], level],
@@ -155,6 +176,7 @@ function addOverlays(map: MlMap, dark: boolean) {
     "entrances",
     "pins",
     "walk-active",
+    "indoor-3d",
   ]) {
     map.addSource(id, { type: "geojson", data: EMPTY });
   }
@@ -568,6 +590,20 @@ function addOverlays(map: MlMap, dark: boolean) {
       "circle-stroke-width": 4,
     },
   });
+  // 3D view: every floor as stacked slabs, the path and floor changes as raised shapes.
+  map.addLayer({
+    id: "indoor-3d",
+    type: "fill-extrusion",
+    source: "indoor-3d",
+    minzoom: INDOOR_ZOOM - 1,
+    layout: { visibility: "none" },
+    paint: {
+      "fill-extrusion-color": ["get", "color"],
+      "fill-extrusion-base": ["get", "base"],
+      "fill-extrusion-height": ["get", "top"],
+      "fill-extrusion-opacity": 0.88,
+    },
+  });
   map.addLayer({
     id: "pins",
     type: "circle",
@@ -654,6 +690,7 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
   const index = useStationIndex();
   const [nearby, setNearby] = useState<StationData[]>([]);
   const [level, setLevel] = useState(0);
+  const [threeD, setThreeD] = useState(false);
   const [zoom, setZoom] = useState(11.5);
 
   // Create the map once. Every style load (first load and theme changes) adds the overlays again.
@@ -808,7 +845,8 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     for (const [id, base] of Object.entries(BASE_FILTER)) {
       map.setFilter(id, ["all", base, filter] as maplibregl.FilterSpecification);
     }
-    const underground = level < 0 && levels.length > 0;
+    // The 3D view shows every floor over the street map, so the street map stays visible.
+    const underground = level < 0 && levels.length > 0 && !threeD;
     map.setLayoutProperty("underground-dim", "visibility", underground ? "visible" : "none");
     // Street-level labels and icons clutter an underground floor.
     for (const layer of map.getStyle().layers) {
@@ -826,7 +864,7 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     ];
     map.setPaintProperty("route", "line-opacity", streetOpacity);
     map.setPaintProperty("route-casing", "line-opacity", streetOpacity);
-  }, [level, ready, levels.length]);
+  }, [level, ready, levels.length, threeD]);
 
   // Itinerary and in-station paths.
   useEffect(() => {
@@ -971,6 +1009,7 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
   // Walkthrough: show the current item on its own floor and fit it into view.
   const item = walk ? walk.items[walk.index] : undefined;
   const fitted = useRef<WalkItem | undefined>(undefined);
+  const fittedTilt = useRef(false);
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -993,8 +1032,13 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     });
     // Fit only when the step changes, not when a style reload (theme change) bumps `ready`:
     // that would undo the user's own floor choice and pan.
-    if (!item || pts.length === 0 || fitted.current === item) return;
+    if (!item) fitted.current = undefined;
+    // Fit again when the step or the 3D tilt changes; a theme reload alone does not refit.
+    if (!item || pts.length === 0 || (fitted.current === item && fittedTilt.current === threeD)) {
+      return;
+    }
     fitted.current = item;
+    fittedTilt.current = threeD;
     if (item.level !== null) setLevel(item.level);
     const b = new maplibregl.LngLatBounds(pts[0], pts[0]);
     for (const p of pts) b.extend(p);
@@ -1006,9 +1050,44 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
       // A single point (an entrance, the destination) needs its surroundings for context.
       maxZoom:
         item.kind === "entrance" || item.kind === "arrive" || item.kind === "board" ? 17.5 : 19,
+      pitch: threeD ? 55 : 0,
       duration: 700,
     });
-  }, [item, ready]);
+  }, [item, ready, threeD]);
+
+  // 3D view: build the shapes, swap the 2D indoor layers for them, and tilt the camera.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    for (const id of FLAT_INDOOR_LAYERS) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", threeD ? "none" : "visible");
+    }
+    map.setLayoutProperty("indoor-3d", "visibility", threeD ? "visible" : "none");
+    // The basemap's own 3D buildings would hide the floors inside them.
+    for (const layer of map.getStyle().layers) {
+      if (layer.type === "fill-extrusion" && layer.id !== "indoor-3d") {
+        map.setLayoutProperty(layer.id, "visibility", threeD ? "none" : "visible");
+      }
+    }
+    const lines = guides.flatMap((g) => [g.board, g.alight]).flatMap((x) => (x ? [x.line] : []));
+    // Heights come from the route's stations, so the floors stay still while the map pans.
+    const routeStations = guides
+      .flatMap((g) => [g.board?.station, g.alight?.station])
+      .filter((x): x is StationData => !!x);
+    const lowest = lowestFloor(routeStations.length > 0 ? routeStations : shown, lines);
+    // A ride step is the whole track: raising it would draw a band across the city.
+    const active =
+      item && item.kind !== "ride" ? { points: item.points, level: item.level } : undefined;
+    (map.getSource("indoor-3d") as GeoJSONSource | undefined)?.setData(
+      (threeD
+        ? build3d(shown, lines, level, dark, active, lowest)
+        : EMPTY) as GeoJSON.FeatureCollection,
+    );
+  }, [threeD, ready, shown, guides, level, dark, item]);
+  useEffect(() => {
+    // During a walkthrough the step is fitted again with the new tilt (below); else just tilt.
+    if (!fitted.current) mapRef.current?.easeTo({ pitch: threeD ? 55 : 0, duration: 600 });
+  }, [threeD]);
 
   const usedLevels = useMemo(() => {
     const set = new Set<number>();
@@ -1096,9 +1175,22 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           </div>
         </div>
       )}
+      {(levels.length > 0 || threeD) && (
+        <button
+          type="button"
+          aria-pressed={threeD}
+          aria-label={threeD ? "Show the map flat" : "Show all floors in 3D"}
+          onClick={() => setThreeD((v) => !v)}
+          className={`absolute top-40 right-2.5 z-10 h-9 w-9 rounded-md border text-sm font-semibold shadow-md pointer-coarse:h-11 pointer-coarse:w-11 md:top-44 ${
+            threeD ? "bg-[#ff6319] text-white" : "bg-background/95 hover:bg-muted"
+          }`}
+        >
+          3D
+        </button>
+      )}
       {levels.length > 1 && (
         <div
-          className="absolute top-40 right-2.5 z-10 flex max-h-[38svh] flex-col overflow-y-auto rounded-md border bg-background/95 shadow-md md:top-44"
+          className="absolute top-[13.5rem] right-2.5 z-10 flex max-h-[34svh] flex-col overflow-y-auto rounded-md border bg-background/95 shadow-md md:top-56"
           role="radiogroup"
           aria-label="Floor"
         >

@@ -18,5 +18,4 @@ Next: —
 | T005 | Map follows the chosen exit; lift exits; building outlines                        | Done  | T004  | `22e61df`; Rautatientori and Tapiola runs             |
 | T006 | Indoor routing to shops in buildings joined to a station (OSM)                    | Done  | T005  | `5980197`; live run Swing House → Dif Döner, 33 tests |
 
-Later: 3D view of multi-floor indoor maps (floors stacked, path drawn through them), when the user
-asks for it.
+Later: —
