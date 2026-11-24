@@ -923,7 +923,9 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
       padding: phone
         ? { top: 130, bottom: 290, left: 60, right: 90 }
         : { top: 130, bottom: 150, left: 120, right: 120 },
-      maxZoom: 19,
+      // A single point (an entrance, the destination) needs its surroundings for context.
+      maxZoom:
+        item.kind === "entrance" || item.kind === "arrive" || item.kind === "board" ? 17.5 : 19,
       duration: 700,
     });
   }, [item, ready]);
@@ -977,11 +979,15 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
               <div className="text-muted-foreground text-xs">
                 Step {walk.index + 1} of {walk.items.length} ·{" "}
                 <span className="font-semibold text-[#c2410c] dark:text-[#ff8a50]">
-                  {item.level === null
-                    ? "floor unknown"
-                    : item.level === 0
-                      ? "Street level"
-                      : `Level ${item.level > 0 ? item.level : `−${-item.level}`}`}
+                  {item.kind === "ride"
+                    ? "On board"
+                    : item.kind === "board"
+                      ? "Boarding"
+                      : item.level === null
+                        ? "floor unknown"
+                        : item.level === 0
+                          ? "Street level"
+                          : `Level ${item.level > 0 ? item.level : `−${-item.level}`}`}
                 </span>
               </div>
               <div className="font-medium text-sm leading-snug">{item.text}</div>

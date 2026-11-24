@@ -288,7 +288,7 @@ export interface WalkItem {
   level: number | null;
   /** The part of the path to show: one point or a line. */
   points: LngLat[];
-  kind: "entrance" | "platform" | PathStep["mode"];
+  kind: "entrance" | "platform" | PathStep["mode"] | "street" | "board" | "ride" | "arrive";
 }
 
 /**

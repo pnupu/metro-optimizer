@@ -12,7 +12,7 @@ import {
   TramFront,
   TriangleAlert,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 import { delay, minutes, modeColor, MODE_NAME, time } from "@/lib/format";
 import type { MetroGuide, StationGuide, TrainEnd } from "@/lib/guidance";
@@ -23,8 +23,8 @@ import {
   exitSign,
   levelName,
   type WalkItem,
-  walkthrough,
 } from "@/lib/guidance";
+import { tripWalkthrough } from "@/lib/trip-walk";
 import type { Alert, Itinerary, Leg, Place } from "@/lib/transitous";
 import { gtfsId } from "@/lib/transitous";
 
@@ -169,15 +169,15 @@ function StationCard({
   direction,
   trainEnd,
   toward,
-  onWalk,
+  walk,
 }: {
   guide: StationGuide;
   direction: "in" | "out";
   trainEnd?: TrainEnd;
   toward?: string;
-  onWalk: OnWalk;
+  /** Opens the whole-trip walkthrough at an item of this station's path. */
+  walk: (index: number) => void;
 }) {
-  const items = walkthrough(guide, trainEnd, toward);
   const { station, entrance, platform, steps } = guide;
   const platformEnd = endOf(guide.trainPosition);
   const sign = exitSign(entrance, direction);
@@ -200,7 +200,7 @@ function StationCard({
         </div>
         <button
           type="button"
-          onClick={() => onWalk(items, 0)}
+          onClick={() => walk(0)}
           className="inline-flex shrink-0 items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs hover:bg-muted pointer-coarse:py-2"
         >
           <MapIcon className="size-3.5" aria-hidden /> Walk me through
@@ -233,7 +233,7 @@ function StationCard({
             <button
               type="button"
               className="text-left underline decoration-dotted underline-offset-4 hover:decoration-solid"
-              onClick={() => onWalk(items, i + 1)}
+              onClick={() => walk(i + 1)}
             >
               {describeStep(s)}
             </button>
@@ -299,6 +299,13 @@ export function ItineraryDetail({
   onWalk: OnWalk;
 }) {
   const byLeg = new Map(guides.map((g) => [g.legIndex, g]));
+  const trip = useMemo(
+    () => tripWalkthrough(itinerary, guides, nameOf),
+    [itinerary, guides, nameOf],
+  );
+  // A station card opens the trip walkthrough at its own first item, plus the step offset.
+  const walkAt = (guide: StationGuide) => (offset: number) =>
+    onWalk(trip.items, (trip.starts.get(guide) ?? 0) + offset);
   const rows: ReactNode[] = [];
   itinerary.legs.forEach((leg, i) => {
     const metro = byLeg.get(i);
@@ -334,7 +341,7 @@ export function ItineraryDetail({
                 {...(itinerary.legs[i + 1]?.headsign
                   ? { toward: itinerary.legs[i + 1]?.headsign }
                   : {})}
-                onWalk={onWalk}
+                walk={walkAt(nextMetro.board)}
               />
             )}
           </div>
@@ -372,7 +379,7 @@ export function ItineraryDetail({
                 direction="in"
                 trainEnd={metro.trainEnd}
                 {...(leg.headsign ? { toward: leg.headsign } : {})}
-                onWalk={onWalk}
+                walk={walkAt(metro.board)}
               />
             )}
             {metro && (metro.trainEnd || itinerary.legs[i + 1]?.mode === "SUBWAY") && (
@@ -405,7 +412,7 @@ export function ItineraryDetail({
                 guide={metro.alight}
                 direction="out"
                 {...(metro.trainEnd ? { trainEnd: metro.trainEnd } : {})}
-                onWalk={onWalk}
+                walk={walkAt(metro.alight)}
               />
             )}
             <Alerts alerts={leg.alerts} />
@@ -429,6 +436,14 @@ export function ItineraryDetail({
         </span>
         <span className="text-muted-foreground">{minutes(itinerary.duration)}</span>
       </div>
+      <button
+        type="button"
+        onClick={() => onWalk(trip.items, 0)}
+        className="mb-4 flex w-full items-center justify-center gap-2 rounded-lg bg-[#ff6319] px-3 py-2.5 font-medium text-sm text-white hover:bg-[#ea580c]"
+      >
+        <MapIcon className="size-4" aria-hidden /> Step by step on the map ({trip.items.length}{" "}
+        steps)
+      </button>
       <ol>{rows}</ol>
       <div className="relative pl-8 text-sm">
         <span className="absolute top-0.5 left-1.5 size-3 rounded-full bg-red-600" />
