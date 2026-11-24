@@ -16,15 +16,23 @@ import type { ReactNode } from "react";
 
 import { delay, minutes, modeColor, MODE_NAME, time } from "@/lib/format";
 import type { MetroGuide, StationGuide, TrainEnd } from "@/lib/guidance";
-import { describeStep, endOf, entranceShort, exitSign, levelName } from "@/lib/guidance";
+import {
+  describeStep,
+  endOf,
+  entranceShort,
+  exitSign,
+  levelName,
+  type WalkItem,
+  walkthrough,
+} from "@/lib/guidance";
 import type { Alert, Itinerary, Leg, Place } from "@/lib/transitous";
 import { gtfsId } from "@/lib/transitous";
 
-import type { MapFocus } from "./map-view";
 import { StepIcon } from "./step-icon";
 import { TrainDiagram } from "./train-diagram";
 
 export type NameOf = (place: Place) => string;
+export type OnWalk = (items: WalkItem[], index: number) => void;
 
 function ModeIcon({ mode, className = "size-4" }: { mode: string; className?: string }) {
   if (mode === "SUBWAY" || mode.includes("RAIL") || mode === "SUBURBAN")
@@ -161,14 +169,15 @@ function StationCard({
   direction,
   trainEnd,
   toward,
-  onShow,
+  onWalk,
 }: {
   guide: StationGuide;
   direction: "in" | "out";
   trainEnd?: TrainEnd;
   toward?: string;
-  onShow: (f: Omit<MapFocus, "nonce">) => void;
+  onWalk: OnWalk;
 }) {
+  const items = walkthrough(guide, trainEnd, toward);
   const { station, entrance, platform, steps } = guide;
   const platformEnd = endOf(guide.trainPosition);
   const sign = exitSign(entrance, direction);
@@ -191,18 +200,10 @@ function StationCard({
         </div>
         <button
           type="button"
-          onClick={() =>
-            onShow({
-              lng: entrance.lng,
-              lat: entrance.lat,
-              level: platform.level ?? -1,
-              zoom: 17.5,
-              fit: guide.path.line.map(([lng, lat]) => [lng, lat] as [number, number]),
-            })
-          }
+          onClick={() => onWalk(items, 0)}
           className="inline-flex shrink-0 items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs hover:bg-muted pointer-coarse:py-2"
         >
-          <MapIcon className="size-3.5" aria-hidden /> Map
+          <MapIcon className="size-3.5" aria-hidden /> Walk me through
         </button>
       </div>
       <ol className="mt-2 space-y-1.5 text-sm">
@@ -228,7 +229,14 @@ function StationCard({
         )}
         {steps.map((s, i) => (
           <Row key={i} icon={<StepIcon mode={s.mode} />}>
-            {describeStep(s)}
+            {/* The walkthrough has one item (entrance or platform) before the steps. */}
+            <button
+              type="button"
+              className="text-left underline decoration-dotted underline-offset-4 hover:decoration-solid"
+              onClick={() => onWalk(items, i + 1)}
+            >
+              {describeStep(s)}
+            </button>
           </Row>
         ))}
         {direction === "in" && (
@@ -282,13 +290,13 @@ export function ItineraryDetail({
   guides,
   nameOf,
   onBack,
-  onShow,
+  onWalk,
 }: {
   itinerary: Itinerary;
   guides: MetroGuide[];
   nameOf: NameOf;
   onBack: () => void;
-  onShow: (f: Omit<MapFocus, "nonce">) => void;
+  onWalk: OnWalk;
 }) {
   const byLeg = new Map(guides.map((g) => [g.legIndex, g]));
   const rows: ReactNode[] = [];
@@ -326,7 +334,7 @@ export function ItineraryDetail({
                 {...(itinerary.legs[i + 1]?.headsign
                   ? { toward: itinerary.legs[i + 1]?.headsign }
                   : {})}
-                onShow={onShow}
+                onWalk={onWalk}
               />
             )}
           </div>
@@ -364,7 +372,7 @@ export function ItineraryDetail({
                 direction="in"
                 trainEnd={metro.trainEnd}
                 {...(leg.headsign ? { toward: leg.headsign } : {})}
-                onShow={onShow}
+                onWalk={onWalk}
               />
             )}
             {metro && (metro.trainEnd || itinerary.legs[i + 1]?.mode === "SUBWAY") && (
@@ -392,7 +400,14 @@ export function ItineraryDetail({
                 )}
               </div>
             )}
-            {metro?.alight && <StationCard guide={metro.alight} direction="out" onShow={onShow} />}
+            {metro?.alight && (
+              <StationCard
+                guide={metro.alight}
+                direction="out"
+                {...(metro.trainEnd ? { trainEnd: metro.trainEnd } : {})}
+                onWalk={onWalk}
+              />
+            )}
             <Alerts alerts={leg.alerts} />
           </div>
         )}

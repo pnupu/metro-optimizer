@@ -10,28 +10,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { modeColor } from "@/lib/format";
 import type { MetroGuide } from "@/lib/guidance";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
+
+import type { WalkItem } from "@/lib/guidance";
 import { exitSign, legLine, levelName, trainEndPoint } from "@/lib/guidance";
 import type { LngLat, StationData } from "@/lib/station-types";
-import { loadStation, useStationIndex } from "@/lib/stations";
+import { DATA_VERSION, loadStation, useStationIndex } from "@/lib/stations";
 import type { Itinerary } from "@/lib/transitous";
-
-export interface MapFocus {
-  lng: number;
-  lat: number;
-  level?: number;
-  zoom?: number;
-  /** Fit these points into view instead of flying to lng/lat. */
-  fit?: [number, number][];
-  /** Change this to fly again to the same place. */
-  nonce: number;
-}
 
 interface Props {
   itinerary?: Itinerary;
   guides: MetroGuide[];
   from?: { lat: number; lon: number };
   to?: { lat: number; lon: number };
-  focus?: MapFocus;
+  /** The floor-by-floor walkthrough of one station path, and the item shown now. */
+  walk?: { items: WalkItem[]; index: number };
+  onWalk?: (index: number | undefined) => void;
 }
 
 maplibregl.setWorkerUrl(workerUrl);
@@ -142,12 +136,20 @@ function addOverlays(map: MlMap, dark: boolean) {
   const fg = dark ? "#e5e7eb" : "#1f2937";
   const halo = dark ? "#0b1220" : "#ffffff";
   const C = INDOOR_COLORS;
-  for (const id of ["indoor", "station-paths", "route", "ends", "entrances", "pins"]) {
+  for (const id of [
+    "indoor",
+    "station-paths",
+    "route",
+    "ends",
+    "entrances",
+    "pins",
+    "walk-active",
+  ]) {
     map.addSource(id, { type: "geojson", data: EMPTY });
   }
   map.addSource("metro-lines", {
     type: "geojson",
-    data: `${import.meta.env.BASE_URL}data/metro-lines.json`,
+    data: `${import.meta.env.BASE_URL}data/metro-lines.json?v=${DATA_VERSION}`,
   });
 
   // Underground the street map fades almost away, so the station plan reads like a floor plan.
@@ -183,10 +185,10 @@ function addOverlays(map: MlMap, dark: boolean) {
         "platform",
         C.platform,
         "corridor-area",
-        dark ? "#334155" : "#ffffff",
+        dark ? "#475569" : "#ffffff",
         "room",
-        dark ? "#3b3326" : "#fbe7cc",
-        dark ? "#1e293b" : "#f8fafc",
+        dark ? "#57472d" : "#fbe7cc",
+        dark ? "#2b3a52" : "#f8fafc",
       ],
       "fill-opacity": 0.95,
     },
@@ -198,7 +200,7 @@ function addOverlays(map: MlMap, dark: boolean) {
     minzoom: INDOOR_ZOOM,
     filter: BASE_FILTER["indoor-outline"],
     paint: {
-      "line-color": dark ? "#94a3b8" : "#64748b",
+      "line-color": dark ? "#cbd5e1" : "#64748b",
       "line-width": ["interpolate", ["linear"], ["zoom"], 16, 0.6, 19, 1.6],
     },
   });
@@ -211,7 +213,7 @@ function addOverlays(map: MlMap, dark: boolean) {
     filter: BASE_FILTER["indoor-line-casing"],
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
-      "line-color": dark ? "#64748b" : "#94a3b8",
+      "line-color": dark ? "#cbd5e1" : "#94a3b8",
       "line-width": ["interpolate", ["linear"], ["zoom"], 16, 4, 19, 14],
     },
   });
@@ -230,7 +232,7 @@ function addOverlays(map: MlMap, dark: boolean) {
         dark ? "#7c2d12" : "#c2410c",
         "platform",
         "#ff8a50",
-        dark ? "#334155" : "#ffffff",
+        dark ? "#64748b" : "#ffffff",
       ],
       "line-opacity": ["match", ["get", "kind"], "track", 0.45, 1],
       // A zoom expression must be the outermost one, so the kinds go inside each stop.
@@ -490,6 +492,33 @@ function addOverlays(map: MlMap, dark: boolean) {
     },
     paint: { "text-color": fg, "text-halo-color": halo, "text-halo-width": 1.5 },
   });
+  // The walkthrough step shown now: a bright, thick line (or a ring for a single point).
+  map.addLayer({
+    id: "walk-active-casing",
+    type: "line",
+    source: "walk-active",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": halo, "line-width": 16 },
+  });
+  map.addLayer({
+    id: "walk-active-line",
+    type: "line",
+    source: "walk-active",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#facc15", "line-width": 9 },
+  });
+  map.addLayer({
+    id: "walk-active-point",
+    type: "circle",
+    source: "walk-active",
+    filter: ["==", ["geometry-type"], "Point"],
+    paint: {
+      "circle-radius": 16,
+      "circle-color": "rgba(250, 204, 21, 0.25)",
+      "circle-stroke-color": "#facc15",
+      "circle-stroke-width": 4,
+    },
+  });
   map.addLayer({
     id: "pins",
     type: "circle",
@@ -567,7 +596,7 @@ function Key({
   );
 }
 
-export function MapView({ itinerary, guides, from, to, focus }: Props) {
+export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
   const [ready, setReady] = useState(0);
@@ -728,6 +757,15 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
       }
     }
     map.setPaintProperty("metro-lines", "line-opacity", underground ? 0.9 : 0.55);
+    // The street part of the trip is not on this floor.
+    const streetOpacity: maplibregl.ExpressionSpecification = [
+      "case",
+      ["==", ["get", "mode"], "SUBWAY"],
+      1,
+      underground ? 0.3 : 1,
+    ];
+    map.setPaintProperty("route", "line-opacity", streetOpacity);
+    map.setPaintProperty("route-casing", "line-opacity", streetOpacity);
   }, [level, ready, levels.length]);
 
   // Itinerary and in-station paths.
@@ -744,14 +782,16 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
       features,
     });
     // Paths in walking order: into the station for boarding, out of it after the ride.
-    const walked = guides.flatMap((g) => [
-      ...(g.board
-        ? [{ guide: g.board, line: g.board.path.line, end: g.trainEnd, out: false }]
-        : []),
-      ...(g.alight
-        ? [{ guide: g.alight, line: [...g.alight.path.line].reverse(), end: g.trainEnd, out: true }]
-        : []),
-    ]);
+    const walked = guides.flatMap((g) =>
+      [g.board, g.alight]
+        .filter((x) => !!x)
+        .map((guide) => ({
+          guide,
+          line: guide.line,
+          end: g.trainEnd,
+          out: guide.direction === "out",
+        })),
+    );
     const pins: GeoJSON.Feature[] = walked.flatMap(({ guide, line, end, out }) => {
       // The board / get-off pin marks the train end on the platform, not where the path arrives.
       const platformPoint = end ? trainEndPoint(guide, end) : out ? line[0] : line.at(-1);
@@ -767,12 +807,39 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
               },
             ]
           : [];
+      // Every floor change gets a pin that names it, so other floors are easy to find.
+      const changes = guide.steps
+        .filter((st) => st.mode !== "walk" && st.toLevel !== st.fromLevel)
+        .flatMap((st) => {
+          // With a floor unknown the direction is unknown too: no arrow then.
+          const known = st.toLevel !== null && st.fromLevel !== null;
+          const arrow = known
+            ? (st.toLevel as number) > (st.fromLevel as number)
+              ? " ↑"
+              : " ↓"
+            : "";
+          const name = {
+            stairs: "Stairs",
+            escalator: "Escalator",
+            elevator: "Lift",
+            level: "Floor change",
+            walk: "",
+          }[st.mode];
+          const to =
+            st.toLevel === null
+              ? ""
+              : st.toLevel === 0
+                ? " to street"
+                : ` to ${st.toLevel > 0 ? st.toLevel : `−${-st.toLevel}`}`;
+          return pin(line[st.a], `${name}${arrow}${to}`);
+        });
       return [
         ...pin(
           platformPoint,
           out ? `Get off${end ? ` at the ${end}` : ""}` : `Board${end ? ` at the ${end}` : ""}`,
         ),
         ...pin(exitPoint, sign.title),
+        ...changes,
       ];
     });
     (map.getSource("pins") as GeoJSONSource | undefined)?.setData({
@@ -821,6 +888,57 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
     });
   }, [itinerary, guides, from, to, ready, level]);
 
+  // Walkthrough: show the current item on its own floor and fit it into view.
+  const item = walk ? walk.items[walk.index] : undefined;
+  const fitted = useRef<WalkItem | undefined>(undefined);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const pts = item?.points ?? [];
+    (map.getSource("walk-active") as GeoJSONSource | undefined)?.setData({
+      type: "FeatureCollection",
+      features:
+        pts.length === 0
+          ? []
+          : [
+              {
+                type: "Feature",
+                properties: {},
+                geometry:
+                  pts.length > 1
+                    ? { type: "LineString", coordinates: pts }
+                    : { type: "Point", coordinates: pts[0] as LngLat },
+              },
+            ],
+    });
+    // Fit only when the step changes, not when a style reload (theme change) bumps `ready`:
+    // that would undo the user's own floor choice and pan.
+    if (!item || pts.length === 0 || fitted.current === item) return;
+    fitted.current = item;
+    if (item.level !== null) setLevel(item.level);
+    const b = new maplibregl.LngLatBounds(pts[0], pts[0]);
+    for (const p of pts) b.extend(p);
+    const phone = window.innerWidth < 768;
+    map.fitBounds(b, {
+      padding: phone
+        ? { top: 130, bottom: 290, left: 60, right: 90 }
+        : { top: 130, bottom: 150, left: 120, right: 120 },
+      maxZoom: 19,
+      duration: 700,
+    });
+  }, [item, ready]);
+
+  const usedLevels = useMemo(() => {
+    const set = new Set<number>();
+    for (const g of guides) {
+      for (const guide of [g.board, g.alight]) {
+        for (const v of guide?.line ?? []) if (v[2] !== null) set.add(v[2]);
+        if (guide?.platform.level != null) set.add(guide.platform.level);
+      }
+    }
+    return set;
+  }, [guides]);
+
   // Fit the itinerary.
   useEffect(() => {
     const map = mapRef.current;
@@ -840,29 +958,54 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
     });
   }, [itinerary]);
 
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !focus) return;
-    if (focus.fit && focus.fit.length > 1) {
-      const b = new maplibregl.LngLatBounds(focus.fit[0], focus.fit[0]);
-      for (const p of focus.fit) b.extend(p);
-      const phone = window.innerWidth < 768;
-      map.fitBounds(b, {
-        padding: phone
-          ? { top: 120, bottom: 170, left: 50, right: 90 }
-          : { top: 120, bottom: 60, left: 80, right: 100 },
-        maxZoom: 18.5,
-        duration: 800,
-      });
-    } else {
-      map.flyTo({ center: [focus.lng, focus.lat], zoom: focus.zoom ?? 17.5, duration: 800 });
-    }
-    if (focus.level !== undefined) setLevel(focus.level);
-  }, [focus]);
-
   return (
     <div className="relative h-full w-full">
       <div ref={container} className="h-full w-full" />
+      {walk && item && (
+        <div className="absolute inset-x-2 bottom-[148px] z-20 mx-auto max-w-md rounded-xl border bg-background/97 p-2 shadow-lg md:bottom-4">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              aria-label="Previous step"
+              disabled={walk.index === 0}
+              onClick={() => onWalk?.(walk.index - 1)}
+              className="grid size-10 shrink-0 place-items-center rounded-lg hover:bg-muted disabled:opacity-30"
+            >
+              <ChevronLeft className="size-5" />
+            </button>
+            <div className="min-w-0 flex-1 px-1" aria-live="polite">
+              <div className="text-muted-foreground text-xs">
+                Step {walk.index + 1} of {walk.items.length} ·{" "}
+                <span className="font-semibold text-[#c2410c] dark:text-[#ff8a50]">
+                  {item.level === null
+                    ? "floor unknown"
+                    : item.level === 0
+                      ? "Street level"
+                      : `Level ${item.level > 0 ? item.level : `−${-item.level}`}`}
+                </span>
+              </div>
+              <div className="font-medium text-sm leading-snug">{item.text}</div>
+            </div>
+            <button
+              type="button"
+              aria-label="Next step"
+              disabled={walk.index === walk.items.length - 1}
+              onClick={() => onWalk?.(walk.index + 1)}
+              className="grid size-10 shrink-0 place-items-center rounded-lg bg-[#ff6319] text-white hover:bg-[#ea580c] disabled:opacity-30"
+            >
+              <ChevronRight className="size-5" />
+            </button>
+            <button
+              type="button"
+              aria-label="End the walkthrough"
+              onClick={() => onWalk?.(undefined)}
+              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+      )}
       {levels.length > 1 && (
         <div
           className="absolute top-40 right-2.5 z-10 flex max-h-[38svh] flex-col overflow-y-auto rounded-md border bg-background/95 shadow-md md:top-44"
@@ -877,17 +1020,26 @@ export function MapView({ itinerary, guides, from, to, focus }: Props) {
               aria-checked={l === level}
               aria-label={levelName(l)}
               onClick={() => setLevel(l)}
-              className={`h-9 w-9 text-sm font-medium tabular-nums pointer-coarse:h-11 pointer-coarse:w-11 ${
+              aria-description={usedLevels.has(l) ? "Your path uses this floor" : undefined}
+              className={`relative h-9 w-9 text-sm font-medium tabular-nums pointer-coarse:h-11 pointer-coarse:w-11 ${
                 l === level ? "bg-[#ff6319] text-white" : "hover:bg-muted"
               }`}
             >
               {l === 0 ? "0" : l > 0 ? l : `−${-l}`}
+              {usedLevels.has(l) && l !== level && (
+                <span
+                  className="absolute top-1 right-1 size-1.5 rounded-full bg-[#ff6319]"
+                  aria-hidden
+                />
+              )}
             </button>
           ))}
         </div>
       )}
       {levels.length > 0 && (
-        <div className="pointer-events-none absolute top-2 left-2 z-10 max-w-[60%] rounded-lg bg-background/95 px-2.5 py-1.5 text-[11px] shadow-md md:top-3 md:left-3">
+        <div
+          className={`pointer-events-none absolute top-2 left-2 z-10 max-w-[60%] rounded-lg bg-background/95 px-2.5 py-1.5 text-[11px] shadow-md md:top-3 md:left-3 ${walk ? "max-md:hidden" : ""}`}
+        >
           <div className="mb-1 font-semibold text-xs">
             {level === 0 ? "Street level" : `Level ${level > 0 ? level : `−${-level}`}`}
             <span className="font-normal text-muted-foreground">

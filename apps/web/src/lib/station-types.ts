@@ -16,6 +16,9 @@ export interface PathStep {
   toLevel: number | null;
   meters: number;
   seconds: number;
+  /** The part of the path line this step covers: vertex indices, first and last. */
+  a: number;
+  b: number;
 }
 
 /** The best path between one entrance and one platform for one profile. */

@@ -7,6 +7,7 @@ import {
   guideItinerary,
   reverseSteps,
   trainPosition,
+  walkthrough,
 } from "./guidance";
 import type { Platform, StationData, StationPath } from "./station-types";
 
@@ -88,10 +89,13 @@ describe("chooseEntrance", () => {
 
 describe("steps", () => {
   test("an exit walks the path backwards", () => {
-    const steps = reverseSteps([
-      { mode: "walk", fromLevel: 0, toLevel: 0, meters: 40, seconds: 30 },
-      { mode: "escalator", fromLevel: 0, toLevel: -2, meters: 30, seconds: 33 },
-    ]);
+    const steps = reverseSteps(
+      [
+        { mode: "walk", fromLevel: 0, toLevel: 0, meters: 40, seconds: 30, a: 0, b: 1 },
+        { mode: "escalator", fromLevel: 0, toLevel: -2, meters: 30, seconds: 33, a: 1, b: 2 },
+      ],
+      3,
+    );
     expect(steps.map(describeStep)).toEqual(["Take the escalator up to street level", "Walk 40 m"]);
   });
 });
@@ -152,5 +156,57 @@ describe("guideItinerary", () => {
     const [g] = guideItinerary([leg("999")], "fastest", lookup);
     expect(g?.alight).toBeUndefined();
     expect(g?.trainEnd).toBeUndefined();
+  });
+});
+
+describe("walkthrough", () => {
+  test("an exit starts on the platform, follows the steps floor by floor, ends at the exit", () => {
+    const pathSteps = [
+      { mode: "walk" as const, fromLevel: 0, toLevel: 0, meters: 40, seconds: 30, a: 0, b: 1 },
+      {
+        mode: "escalator" as const,
+        fromLevel: 0,
+        toLevel: -2,
+        meters: 30,
+        seconds: 33,
+        a: 1,
+        b: 2,
+      },
+      { mode: "walk" as const, fromLevel: -2, toLevel: -2, meters: 10, seconds: 8, a: 2, b: 3 },
+    ];
+    const line: [number, number, number][] = [
+      [24.929, 60.1702, 0],
+      [24.9295, 60.1701, 0],
+      [24.93, 60.17, -2],
+      [24.9305, 60.17, -2],
+    ];
+    const reversed = [...line].reverse();
+    const steps = reverseSteps(pathSteps, line.length);
+    const items = walkthrough(
+      {
+        station,
+        platform,
+        entrance: station.entrances[0] as StationData["entrances"][number],
+        path: { ...path("west", 0.05, 60), steps: pathSteps, line },
+        steps,
+        line: reversed,
+        direction: "out",
+        trainPosition: 0.1,
+        alongAxis: true,
+        profile: "fastest",
+        fallback: false,
+        uncertain: false,
+      },
+      "back",
+    );
+    expect(items.map((i) => i.kind)).toEqual(["platform", "walk", "escalator", "walk", "entrance"]);
+    expect(items[3]?.text).toBe("Walk 40 m to exit A");
+    expect(items[1]?.text).toBe("Walk 10 m to the escalator");
+    expect(items.map((i) => i.level)).toEqual([-1, -2, -2, 0, 0]);
+    // The first walk out is the platform end of the path: reversed vertices 0..1.
+    expect(items[1]?.points).toEqual([
+      [24.9305, 60.17],
+      [24.93, 60.17],
+    ]);
   });
 });

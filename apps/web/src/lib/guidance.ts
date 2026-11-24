@@ -9,6 +9,7 @@ import type {
   Entrance,
   LngLat,
   PathStep,
+  PathVertex,
   Platform,
   Profile,
   StationData,
@@ -22,8 +23,11 @@ export interface StationGuide {
   platform: Platform;
   entrance: Entrance;
   path: StationPath;
-  /** Steps in walking order (reversed for an exit). */
+  /** Steps in walking order (reversed for an exit); `a`/`b` index into `line`. */
   steps: PathStep[];
+  /** The path in walking order. */
+  line: PathVertex[];
+  direction: "in" | "out";
   /** Where the path meets the platform, 0 = back of the train, 1 = front. */
   trainPosition: number;
   /** The profile asked for. */
@@ -125,8 +129,15 @@ export function chooseEntrance(
 }
 
 /** Steps of a path walked from the platform to the entrance. */
-export function reverseSteps(steps: PathStep[]): PathStep[] {
-  return [...steps].reverse().map((s) => ({ ...s, fromLevel: s.toLevel, toLevel: s.fromLevel }));
+export function reverseSteps(steps: PathStep[], lineLength: number): PathStep[] {
+  const last = lineLength - 1;
+  return [...steps].reverse().map((s) => ({
+    ...s,
+    fromLevel: s.toLevel,
+    toLevel: s.fromLevel,
+    a: Math.max(0, last - s.b),
+    b: Math.max(0, last - s.a),
+  }));
 }
 
 function guideFor(
@@ -146,13 +157,17 @@ function guideFor(
   if (!choice) return undefined;
   const entrance = station.entrances.find((e) => e.id === choice.path.entrance);
   if (!entrance) return undefined;
-  const steps = direction === "in" ? choice.path.steps : reverseSteps(choice.path.steps);
+  const line = direction === "in" ? choice.path.line : [...choice.path.line].reverse();
+  const steps =
+    direction === "in" ? choice.path.steps : reverseSteps(choice.path.steps, line.length);
   return {
     station,
     platform,
     entrance,
     path: choice.path,
     steps,
+    line,
+    direction,
     trainPosition:
       travel === undefined ? 0.5 : trainPosition(platform, travel, choice.path.position),
     alongAxis:
@@ -265,3 +280,73 @@ export function exitSign(
 
 /** "entrance B", or "the exit" when the entrance has no letter. */
 export const entranceShort = (e: Entrance) => (e.ref ? `exit ${e.ref}` : "the exit");
+
+/** One stop of the floor-by-floor walkthrough on the map. */
+export interface WalkItem {
+  text: string;
+  /** The floor to show for this item. */
+  level: number | null;
+  /** The part of the path to show: one point or a line. */
+  points: LngLat[];
+  kind: "entrance" | "platform" | PathStep["mode"];
+}
+
+/**
+ * The in-station path as a sequence of map views: the entrance or the platform, each step on its
+ * own floor, then the platform or the exit.
+ */
+export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: string): WalkItem[] {
+  const ll = (v: PathVertex | undefined): LngLat[] => (v ? [[v[0], v[1]]] : []);
+  const span = (a: number, b: number) =>
+    guide.line.slice(Math.max(0, a), b + 1).map(([lng, lat]) => [lng, lat] as LngLat);
+  const sign = exitSign(guide.entrance, guide.direction);
+  const entrance: LngLat = [guide.entrance.lng, guide.entrance.lat];
+  const platformArrival = guide.direction === "in" ? guide.line.at(-1) : guide.line[0];
+  const platformPoints = [
+    ...ll(platformArrival),
+    ...(trainEnd ? [trainEndPoint(guide, trainEnd)] : []),
+  ];
+  const level = (s: PathStep) => s.fromLevel ?? s.toLevel;
+  const steps: WalkItem[] = guide.steps.map((s) => ({
+    text: describeStep(s),
+    level: level(s),
+    // A floor change is a point in the data: show it with its neighbours for context.
+    points: s.mode === "walk" ? span(s.a, s.b) : span(s.a - 1, s.b + 1),
+    kind: s.mode,
+  }));
+  const platform: WalkItem = {
+    text:
+      guide.direction === "in"
+        ? `Platform (${levelName(guide.platform.level)}): follow signs for trains${toward ? ` toward ${toward}` : ""}${trainEnd && trainEnd !== endOf(guide.trainPosition) ? ` and walk to the ${trainEnd}` : ""}`
+        : `Get off at the ${trainEnd ?? "nearest door"}, then follow signs for ${sign.short}`,
+    level: guide.platform.level,
+    points: platformPoints,
+    kind: "platform",
+  };
+  const door: WalkItem = {
+    text:
+      guide.direction === "in"
+        ? `${sign.title}${sign.where ? ` · ${sign.where}` : ""}: go in here`
+        : `${sign.title}: you come out at ${sign.where ?? "street level"}`,
+    level: guide.entrance.level,
+    points: [entrance],
+    kind: "entrance",
+  };
+  // Say where each walk leads: the next floor change, the platform, or the exit.
+  const target = (next: PathStep | undefined) => {
+    if (!next) return guide.direction === "in" ? "the platform" : entranceShort(guide.entrance);
+    return {
+      stairs: "the stairs",
+      escalator: "the escalator",
+      elevator: "the lift",
+      level: "the floor change",
+      walk: "",
+    }[next.mode];
+  };
+  guide.steps.forEach((s, i) => {
+    const t = s.mode === "walk" ? target(guide.steps[i + 1]) : "";
+    const item = steps[i];
+    if (t && item) item.text = `${item.text} to ${t}`;
+  });
+  return guide.direction === "in" ? [door, ...steps, platform] : [platform, ...steps, door];
+}

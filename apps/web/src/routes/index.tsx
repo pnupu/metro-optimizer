@@ -4,9 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 
 import { ItineraryDetail, ItinerarySummary, stationIdOf } from "@/components/itinerary";
-import { type MapFocus, MapView } from "@/components/map-view";
+import { MapView } from "@/components/map-view";
 import { PlaceInput, type PlaceValue } from "@/components/place-input";
-import { guideItinerary, type MetroGuide } from "@/lib/guidance";
+import { guideItinerary, type MetroGuide, type WalkItem } from "@/lib/guidance";
 import type { Profile } from "@/lib/station-types";
 import { useStationIndex, useStations } from "@/lib/stations";
 import { gtfsId, type Itinerary, type Place, plan } from "@/lib/transitous";
@@ -51,7 +51,7 @@ function Planner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [selected, setSelected] = useState<number | null>(null);
-  const [focus, setFocus] = useState<MapFocus>();
+  const [walk, setWalk] = useState<{ items: WalkItem[]; index: number }>();
   const [sheet, setSheet] = useState<Sheet>("half");
   const [about, setAbout] = useState(false);
 
@@ -125,10 +125,7 @@ function Planner() {
   );
 
   const current = selected === null ? undefined : itineraries[selected];
-  const show = (f: Omit<MapFocus, "nonce">) => {
-    setFocus({ ...f, nonce: Date.now() });
-    setSheet("min");
-  };
+  useEffect(() => setWalk(undefined), [selected, itineraries]);
 
   return (
     <div className="relative h-svh w-full overflow-hidden md:grid md:grid-cols-[420px_1fr]">
@@ -138,7 +135,10 @@ function Planner() {
           guides={guides[selected ?? 0] ?? []}
           {...(from ? { from } : {})}
           {...(to ? { to } : {})}
-          {...(focus ? { focus } : {})}
+          {...(walk ? { walk } : {})}
+          onWalk={(index) =>
+            setWalk((w) => (w && index !== undefined ? { ...w, index } : undefined))
+          }
         />
       </div>
 
@@ -281,7 +281,10 @@ function Planner() {
               guides={guides[selected ?? 0] ?? []}
               nameOf={nameOf}
               onBack={() => setSelected(null)}
-              onShow={show}
+              onWalk={(items, index) => {
+                setWalk({ items, index });
+                setSheet("min");
+              }}
             />
           )}
           {!loading && !current && itineraries.length > 0 && (

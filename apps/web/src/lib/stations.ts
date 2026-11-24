@@ -3,11 +3,16 @@ import { useEffect, useState } from "react";
 import type { StationData, StationIndex } from "./station-types";
 
 const base = `${import.meta.env.BASE_URL}data`;
+/**
+ * Bump when the station data format changes. The service worker serves cached data first, so
+ * without a new URL a returning phone would read the old format once.
+ */
+export const DATA_VERSION = 2;
 let indexPromise: Promise<StationIndex> | undefined;
 const stationPromises = new Map<string, Promise<StationData>>();
 
 export function loadIndex(): Promise<StationIndex> {
-  indexPromise ??= fetch(`${base}/stations.json`).then((r) => {
+  indexPromise ??= fetch(`${base}/stations.json?v=${DATA_VERSION}`).then((r) => {
     if (!r.ok) throw new Error(`Station index ${r.status}`);
     return r.json() as Promise<StationIndex>;
   });
@@ -17,7 +22,7 @@ export function loadIndex(): Promise<StationIndex> {
 export function loadStation(id: string): Promise<StationData> {
   let p = stationPromises.get(id);
   if (!p) {
-    p = fetch(`${base}/stations/${id}.json`).then((r) => {
+    p = fetch(`${base}/stations/${id}.json?v=${DATA_VERSION}`).then((r) => {
       if (!r.ok) throw new Error(`Station ${id} ${r.status}`);
       return r.json() as Promise<StationData>;
     });

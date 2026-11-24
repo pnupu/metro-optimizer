@@ -474,6 +474,7 @@ function summarize(
     if (!edge) continue;
     meters += edge.meters;
     let from = before;
+    let start = i - 1;
     // A level change on a horizontal way: an elevator (a point in OSM) or an undescribed change.
     if (edge.mode === "walk" && before !== null && level !== null && before !== level) {
       const elevator = viaElevator || elevatorNodes.has(node);
@@ -483,9 +484,13 @@ function summarize(
         toLevel: level,
         meters: 0,
         seconds: elevator ? ELEVATOR_SECONDS : UNKNOWN_LEVEL_SECONDS,
+        a: i - 1,
+        b: i - 1,
       });
       viaElevator = false;
       from = level;
+      // The walk after the change starts on the new floor, not at the vertex before it.
+      start = i;
     } else if (edge.mode !== "walk") {
       viaElevator = false;
     }
@@ -495,6 +500,7 @@ function summarize(
       last.meters += edge.meters;
       last.seconds += seconds;
       last.toLevel = level;
+      last.b = i;
     } else {
       steps.push({
         mode: edge.mode,
@@ -502,6 +508,8 @@ function summarize(
         toLevel: level,
         meters: edge.meters,
         seconds,
+        a: start,
+        b: i,
       });
     }
   }
