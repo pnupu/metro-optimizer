@@ -29,7 +29,11 @@
     "dev:web": "bun run --filter web dev",
     "env:generate": "varlock codegen --path ./apps/web/",
     "postinstall": "varlock codegen --path ./apps/web/",
-    "check": "oxlint && oxfmt --write"
+    "check": "oxlint && oxfmt --write",
+    "test": "bun run --filter web test",
+    "data": "bun run --filter web data",
+    "lint": "oxlint",
+    "fmt:check": "oxfmt --check"
   },
   "dependencies": {
     "zod": "catalog:"

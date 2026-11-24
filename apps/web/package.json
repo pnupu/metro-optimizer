@@ -10,7 +10,9 @@
     "start": "vite",
     "check-types": "vite build && tsc --noEmit",
     "generate-pwa-assets": "pwa-assets-generator",
-    "env:generate": "varlock codegen"
+    "env:generate": "varlock codegen",
+    "data": "bun scripts/build-data.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@metro-optimizer/ui": "workspace:*",
@@ -18,6 +20,7 @@
     "@tanstack/react-router": "^1.170.46",
     "@varlock/vite-integration": "1.5.6",
     "lucide-react": "catalog:",
+    "maplibre-gl": "6.19.0",
     "next-themes": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
@@ -30,6 +33,8 @@
     "@metro-optimizer/config": "workspace:*",
     "@tanstack/react-router-devtools": "^1.167.3",
     "@tanstack/router-plugin": "^1.169.0",
+    "@types/bun": "1.4.5",
+    "@types/geojson": "7946.0.16",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",

@@ -1,8 +1,6 @@
 import { Toaster } from "@metro-optimizer/ui/components/sonner";
 import { HeadContent, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
-import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 
-import Header from "@/components/header";
 import { ThemeProvider } from "@/components/theme-provider";
 
 import "../index.css";
@@ -13,18 +11,11 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
   component: RootComponent,
   head: () => ({
     meta: [
-      {
-        title: "metro-optimizer",
-      },
+      { title: "Metro Optimizer · Helsinki trip planner" },
       {
         name: "description",
-        content: "metro-optimizer is a web application",
-      },
-    ],
-    links: [
-      {
-        rel: "icon",
-        href: "/favicon.ico",
+        content:
+          "Helsinki trip planner that shows which metro entrance to use, the stairs, escalators and elevators, and which end of the train to board.",
       },
     ],
   }),
@@ -36,17 +27,14 @@ function RootComponent() {
       <HeadContent />
       <ThemeProvider
         attribute="class"
-        defaultTheme="dark"
+        defaultTheme="system"
+        enableSystem
         disableTransitionOnChange
-        storageKey="vite-ui-theme"
+        storageKey="theme"
       >
-        <div className="grid grid-rows-[auto_1fr] h-svh">
-          <Header />
-          <Outlet />
-        </div>
+        <Outlet />
         <Toaster richColors />
       </ThemeProvider>
-      <TanStackRouterDevtools position="bottom-left" />
     </>
   );
 }

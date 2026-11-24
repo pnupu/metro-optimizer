@@ -22,12 +22,24 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      workbox: { globPatterns: ["**/*.{js,css,html,png,svg,ico}"] },
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,png,svg,ico}"],
+        // Station data changes rarely: serve it from the cache and refresh it in the background.
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.includes("/data/"),
+            handler: "StaleWhileRevalidate",
+            options: { cacheName: "station-data" },
+          },
+        ],
+      },
       manifest: {
-        name: "metro-optimizer",
-        short_name: "metro-optimizer",
-        description: "metro-optimizer - PWA Application",
-        theme_color: "#0c0c0c",
+        name: "Metro Optimizer",
+        short_name: "Metro",
+        description: "Helsinki trip planner with in-station routing for the metro",
+        theme_color: "#ff6319",
+        background_color: "#ffffff",
+        display: "standalone",
       },
       pwaAssets: { disabled: false, config: true },
       devOptions: { enabled: true },

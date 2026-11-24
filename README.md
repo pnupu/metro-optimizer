@@ -1,87 +1,69 @@
-# metro-optimizer
+# Metro Optimizer
 
-This project was created with [Better-T-Stack](https://github.com/AmanVarshney01/create-better-t-stack), a modern TypeScript stack that combines React, TanStack Router, and more.
+A phone-first trip planner for the Helsinki region that also routes you **inside metro stations**:
+which entrance or exit to use, the stairs, escalators and elevators on the way, and which end of
+the train to board so you step off next to your exit. All text is in English.
 
-## Features
+- **Trip planning and live times:** [Transitous](https://transitous.org/) (MOTIS), no API key.
+- **Station routing:** computed from [OpenStreetMap](https://www.openstreetmap.org/) indoor data
+  for all 30 metro stations: entrances, corridors, stairs, escalators, elevators and platforms.
+- **Maps:** [OpenFreeMap](https://openfreemap.org/) street map with English labels, plus an indoor
+  and underground layer with a floor picker, drawn from the same OSM data.
 
-- **TypeScript** - For type safety and improved developer experience
-- **TanStack Router** - File-based routing with full type safety
-- **TailwindCSS** - Utility-first CSS for rapid UI development
-- **Shared UI package** - shadcn/ui primitives live in `packages/ui`
-- **PWA** - Progressive Web App support
-- **Oxlint** - Oxlint + Oxfmt (linting & formatting)
+## Route modes
 
-## Getting Started
+| Mode      | Station paths may use                                        |
+| --------- | ------------------------------------------------------------ |
+| Fastest   | Anything                                                     |
+| No stairs | Escalators and elevators                                     |
+| Step-free | Elevators only (also asks Transitous for wheelchair routing) |
 
-First, install the dependencies:
+Where OSM joins two floors without mapping how (no stairs, escalator or elevator), the app shows
+"the map does not show how" and step-free paths avoid that connection.
+
+## Which end of the train
+
+For each platform the data builder finds the platform's two ends in OSM and where each station path
+reaches the platform (0..1 along it). At run time the app compares the platform direction with the
+direction of travel of the metro leg, so the position becomes back, middle or front of the train.
+Trains are about 90 m (4 cars); older platforms are longer, so the advice is the train end, not a car
+number.
+
+## Commands
 
 ```bash
 bun install
+bun run dev:web     # http://localhost:3001
+bun run test        # unit tests (station graph and guidance)
+bun run data        # rebuild apps/web/public/data from HSL GTFS and the OSM API
+bun run build       # production build in apps/web/dist
+bunx oxlint && bunx oxfmt --check
 ```
 
-Then, run the development server:
+`bun run data` downloads the HSL GTFS feed (about 90 MB) and the OSM data around each station into
+`apps/web/.cache/` (kept for a day; `--refresh` downloads again), then writes:
+
+- `public/data/stations.json`: the station index
+- `public/data/stations/<id>.json`: entrances, platforms, in-station paths and indoor map features
+- `public/data/metro-lines.json`: M1 and M2 line geometry
+
+## Deploy
+
+The app is a static site. Build it and publish `apps/web/dist` to Vinssi Pages:
 
 ```bash
-bun run dev
+bun run build
+npx -y vinssi@0.1.4 pages publish apps/web/dist --site <siteId> --json
 ```
 
-Open [http://localhost:3001](http://localhost:3001) in your browser to see the web application.
+## Data and licences
 
-## UI Customization
+- Code: MIT, see `LICENSE`.
+- `apps/web/public/data/` is derived from OpenStreetMap and is available under the
+  [ODbL](https://opendatacommons.org/licenses/odbl/) © OpenStreetMap contributors. Stop data comes
+  from HSL open data (CC BY 4.0).
+- The Transitous API is for free, open-source, non-commercial use:
+  <https://transitous.org/api/>.
 
-React web apps in this stack share shadcn/ui primitives through `packages/ui`.
-
-- Change design tokens and global styles in `packages/ui/src/styles/globals.css`
-- Update shared primitives in `packages/ui/src/components/*`
-- Adjust shadcn aliases or style config in `packages/ui/components.json` and `apps/web/components.json`
-
-### Add more shared components
-
-Run this from the project root to add more primitives to the shared UI package:
-
-```bash
-npx shadcn@latest add accordion dialog popover sheet table -c packages/ui
-```
-
-Import shared components like this:
-
-```tsx
-import { Button } from "@metro-optimizer/ui/components/button";
-```
-
-### Add app-specific blocks
-
-If you want to add app-specific blocks instead of shared primitives, run the shadcn CLI from `apps/web`.
-
-## Environment Configuration
-
-Each app owns its environment schema in `.env.schema`. Varlock generates `src/env.ts` during installation; run `bun run env:generate` after changing a schema. Commit schemas, and keep secrets in ignored env files or your deployment platform.
-
-Import the generated `ENV` accessor in application code. Shared database and auth packages receive configuration or initialized clients from the application. See [Varlock's monorepo guide](https://varlock.dev/guides/monorepos/).
-
-Bun's automatic env loading is disabled in `bunfig.toml`; the framework integration or server bootstrap loads Varlock. Node deployments must include Varlock and its dependencies alongside the app schema.
-
-Run standalone Node/Bun tools that use Varlock from the owning app directory so they load that app's schema and env files. `env:generate` only generates TypeScript files; it does not initialize environment values in a subsequent command.
-
-## Git Hooks and Formatting
-
-- Run checks: `bun run check`
-
-## Project Structure
-
-```
-metro-optimizer/
-├── apps/
-│   ├── web/         # Frontend application (React + TanStack Router)
-├── packages/
-│   ├── ui/          # Shared shadcn/ui components and styles
-```
-
-## Available Scripts
-
-- `bun run dev`: Start all applications in development mode
-- `bun run build`: Build all applications
-- `bun run dev:web`: Start only the web application
-- `bun run check-types`: Check TypeScript types across all apps
-- `bun run check`: Run Oxlint and Oxfmt
-- `cd apps/web && bun run generate-pwa-assets`: Generate PWA assets
+Built with [Better-T-Stack](https://www.better-t-stack.dev/) (React, TanStack Router, Tailwind,
+PWA, Oxlint), Bun and MapLibre GL.

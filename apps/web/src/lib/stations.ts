@@ -1,0 +1,55 @@
+import { useEffect, useState } from "react";
+
+import type { StationData, StationIndex } from "./station-types";
+
+const base = `${import.meta.env.BASE_URL}data`;
+let indexPromise: Promise<StationIndex> | undefined;
+const stationPromises = new Map<string, Promise<StationData>>();
+
+export function loadIndex(): Promise<StationIndex> {
+  indexPromise ??= fetch(`${base}/stations.json`).then((r) => {
+    if (!r.ok) throw new Error(`Station index ${r.status}`);
+    return r.json() as Promise<StationIndex>;
+  });
+  return indexPromise;
+}
+
+export function loadStation(id: string): Promise<StationData> {
+  let p = stationPromises.get(id);
+  if (!p) {
+    p = fetch(`${base}/stations/${id}.json`).then((r) => {
+      if (!r.ok) throw new Error(`Station ${id} ${r.status}`);
+      return r.json() as Promise<StationData>;
+    });
+    stationPromises.set(id, p);
+  }
+  return p;
+}
+
+/** Loads the given stations; the map grows as files arrive. */
+export function useStations(ids: string[]): Map<string, StationData> {
+  const [loaded, setLoaded] = useState(() => new Map<string, StationData>());
+  const key = [...new Set(ids)].toSorted().join(",");
+  useEffect(() => {
+    let live = true;
+    const wanted = key ? key.split(",") : [];
+    void Promise.all(wanted.map((id) => loadStation(id).catch(() => undefined))).then((list) => {
+      if (!live) return;
+      const next = new Map<string, StationData>();
+      for (const s of list) if (s) next.set(s.id, s);
+      setLoaded(next);
+    });
+    return () => {
+      live = false;
+    };
+  }, [key]);
+  return loaded;
+}
+
+export function useStationIndex(): StationIndex | undefined {
+  const [index, setIndex] = useState<StationIndex>();
+  useEffect(() => {
+    void loadIndex().then(setIndex, () => undefined);
+  }, []);
+  return index;
+}
