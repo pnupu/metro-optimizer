@@ -123,6 +123,13 @@ function streetItems(chunks: Chunk[], goal: string): WalkItem[] {
   }));
 }
 
+/** A street walk next to a guided station, cut at the exit and entrance the app chose. */
+export function walkGeometry(leg: Leg, exit?: LngLat, entrance?: LngLat): LngLat[] {
+  return cut(streetChunks(leg), exit, entrance).flatMap((c, i) =>
+    i === 0 ? c.points : c.points.slice(1),
+  );
+}
+
 export function tripWalkthrough(
   itinerary: Itinerary,
   guides: MetroGuide[],

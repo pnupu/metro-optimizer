@@ -7,7 +7,7 @@ const base = `${import.meta.env.BASE_URL}data`;
  * Bump when the station data format changes. The service worker serves cached data first, so
  * without a new URL a returning phone would read the old format once.
  */
-export const DATA_VERSION = 2;
+export const DATA_VERSION = 3;
 let indexPromise: Promise<StationIndex> | undefined;
 const stationPromises = new Map<string, Promise<StationData>>();
 

@@ -15,8 +15,8 @@ import type {
   StationData,
   StationPath,
 } from "./station-types";
-import { PROFILES } from "./station-types";
-import { areaAt, areasAlong, namedAreas, nearestStreet } from "./signs";
+import { ELEVATOR_SECONDS, PROFILES } from "./station-types";
+import { areaAt, areaPolygons, areasAlong, namedAreas, nearestStreet } from "./signs";
 
 export type Tags = Record<string, string>;
 export interface OsmNode {
@@ -96,7 +96,7 @@ const SPEED = { walk: 1.3, stairs: 0.55, escalator: 0.9, elevator: 1, level: 1 }
 /** Extra cost of a level change that OSM does not describe, seconds. */
 const UNKNOWN_LEVEL_SECONDS = 20;
 /** Fixed cost of one elevator ride (wait + ride), seconds. */
-const ELEVATOR_SECONDS = 45;
+// Shared with the app, which adds a lift ride at lift entrances.
 /** Paths longer than this belong to another station or are data errors. */
 const MAX_PATH_METERS = 650;
 
@@ -278,6 +278,13 @@ export function buildStation(
     const id = String(n.id);
     entranceNode.set(id, at);
     const street = t["addr:street"] ?? nearestStreet([n.lon, n.lat], ways, maybeLl);
+    // Some entrances are a lift (Rautatientori C): the path ends at its lower floor, and the
+    // last step is the lift ride to its top.
+    const lift = t.highway === "elevator" ? parseLevels(t.level) : [];
+    // A lift entrance's own level tag gives both ends; the ways touching it may give either.
+    const entranceLevel =
+      lift.length > 1 ? (lift[0] as number) : (nodeLevel.get(n.id) ?? parseLevels(t.level)[0] ?? 0);
+    const liftTop = lift.length > 1 ? lift.at(-1) : undefined;
     const place = areaAt([n.lon, n.lat], areas);
     entrances.push({
       id,
@@ -285,7 +292,8 @@ export function buildStation(
       ...(t["name:en"] || t.name ? { name: t["name:en"] ?? t.name } : {}),
       lng: n.lon,
       lat: n.lat,
-      level: nodeLevel.get(n.id) ?? parseLevels(t.level)[0] ?? 0,
+      level: entranceLevel,
+      ...(liftTop !== undefined && liftTop !== entranceLevel ? { liftTo: liftTop } : {}),
       ...(t.wheelchair ? { wheelchair: t.wheelchair } : {}),
       ...(street ? { street } : {}),
       ...(place && place !== street ? { place } : {}),
@@ -403,13 +411,15 @@ export function buildStation(
         }
         chain.reverse();
         const result = summarize(chain, nodeLevel, elevatorNodes, ll, entrance.level);
+        // A lift entrance adds a ride the graph search does not see (the path starts inside it).
+        const liftSeconds = entrance.liftTo === undefined ? 0 : ELEVATOR_SECONDS;
         if (result.meters > MAX_PATH_METERS) continue;
         paths.push({
           entrance: entrance.id,
           platform: platform.code,
           profile,
           meters: Math.round(result.meters),
-          seconds: Math.round(best),
+          seconds: Math.round(best + liftSeconds),
           position: Number(projectFraction(ll(target), ...platform.axis).toFixed(3)),
           steps: result.steps,
           line: result.line,
@@ -426,6 +436,16 @@ export function buildStation(
   }
 
   const indoor = extractIndoor(nodes, ways, ll);
+  // Named buildings and malls on every floor, so the map shows when a path is inside one.
+  for (const area of areas.filter((a) => a.building)) {
+    for (const polygon of areaPolygons(area)) {
+      indoor.push({
+        type: "Feature",
+        properties: { kind: "building", name: area.name, lmin: -99, lmax: 99 },
+        geometry: { type: "Polygon", coordinates: polygon.map((ring) => ring.map(roundLL)) },
+      });
+    }
+  }
   // Floors for the picker: whole levels that have at least a few indoor features.
   const counts = new Map<number, number>();
   for (const f of indoor) {

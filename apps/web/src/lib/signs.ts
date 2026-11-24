@@ -7,8 +7,15 @@ import type { LngLat } from "./station-types";
 
 export interface NamedArea {
   name: string;
+  /** A building or mall, as opposed to an open square or bus station. */
+  building: boolean;
+  /** Outer and inner rings together: the even-odd test in `inside` makes inners holes. */
   rings: LngLat[][];
+  outers: LngLat[][];
+  inners: LngLat[][];
 }
+
+const isBuilding = (t: Tags | undefined) => t?.building !== undefined || t?.shop === "mall";
 
 type Tags = Record<string, string>;
 interface Way {
@@ -84,25 +91,46 @@ export function namedAreas(
   for (const w of ways) {
     if (!isPlace(w.tags) || w.nodes[0] !== w.nodes.at(-1)) continue;
     const ring = coords(w);
-    if (ring.length >= 4) out.push({ name: nameOf(w.tags) as string, rings: [ring] });
+    if (ring.length >= 4) {
+      out.push({
+        name: nameOf(w.tags) as string,
+        building: isBuilding(w.tags),
+        rings: [ring],
+        outers: [ring],
+        inners: [],
+      });
+    }
   }
   const byId = new Map(ways.map((w) => [w.id, w]));
   for (const r of relations) {
     if (r.tags?.type !== "multipolygon" || !isPlace(r.tags)) continue;
-    const outers = (r.members ?? [])
-      .filter((m) => m.type === "way" && m.role !== "inner")
-      .map((m) => byId.get(m.ref))
-      .filter((w): w is Way => !!w)
-      .map(coords);
-    const rings = joinRings(outers);
-    if (rings.length > 0) out.push({ name: nameOf(r.tags) as string, rings });
+    const member = (inner: boolean) =>
+      joinRings(
+        (r.members ?? [])
+          .filter((m) => m.type === "way" && (m.role === "inner") === inner)
+          .map((m) => byId.get(m.ref))
+          .filter((w): w is Way => !!w)
+          .map(coords),
+      );
+    const outers = member(false);
+    const inners = member(true);
+    if (outers.length > 0) {
+      out.push({
+        name: nameOf(r.tags) as string,
+        building: isBuilding(r.tags),
+        rings: [...outers, ...inners],
+        outers,
+        inners,
+      });
+    }
   }
   return out;
 }
 
-export function inside(p: LngLat, area: NamedArea): boolean {
+/** Even-odd point-in-polygon over a set of rings. */
+export function inRings(p: LngLat, rings: LngLat[][]): boolean {
   let hit = false;
-  for (const ring of area.rings) {
+  for (const ring of rings) {
     for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
       const [xi, yi] = ring[i] as LngLat;
       const [xj, yj] = ring[j] as LngLat;
@@ -110,6 +138,18 @@ export function inside(p: LngLat, area: NamedArea): boolean {
     }
   }
   return hit;
+}
+
+export function inside(p: LngLat, area: NamedArea): boolean {
+  return inRings(p, area.rings);
+}
+
+/** GeoJSON polygons of an area: each outer ring with the inner rings (courtyards) inside it. */
+export function areaPolygons(area: NamedArea): LngLat[][][] {
+  return area.outers.map((outer) => [
+    outer,
+    ...area.inners.filter((inner) => inner[0] && inRings(inner[0], [outer])),
+  ]);
 }
 
 /** Distance from p to the segment a-b in meters (local flat approximation). */

@@ -3,6 +3,9 @@
 export type Profile = "fastest" | "noStairs" | "stepFree";
 export const PROFILES: readonly Profile[] = ["fastest", "noStairs", "stepFree"];
 
+/** Fixed cost of one lift ride (wait and ride), seconds. */
+export const ELEVATOR_SECONDS = 45;
+
 /** `level` is a level change that OSM does not describe (no stairs, escalator or elevator mapped). */
 export type Mode = "walk" | "stairs" | "escalator" | "elevator" | "level";
 
@@ -48,6 +51,8 @@ export interface Entrance {
   street?: string;
   /** Named building, shopping centre or square the exit leads into. */
   place?: string;
+  /** For an entrance that is a lift: the floor the lift goes up to (usually the street). */
+  liftTo?: number;
   /** Destinations on the station's exit signs (from the city's station guide map). */
   signs?: string[];
 }

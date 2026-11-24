@@ -85,3 +85,29 @@ describe("buildStation", () => {
     expect(data.levels).toContain(-1);
   });
 });
+
+describe("lift entrances", () => {
+  // Entrance C is a lift from level -1 to the street, mapped as one node on a level 0 footway.
+  const lift: OsmElement[] = [
+    ...elements.filter((e) => e.type !== "node" || e.id !== 10),
+    node(10, 60.1702, 24.9295, {
+      railway: "subway_entrance",
+      ref: "C",
+      highway: "elevator",
+      level: "-1;0",
+    }),
+    node(20, 60.1701, 24.93),
+    way(105, [10, 20], { highway: "footway", level: "0" }),
+    way(106, [10, 1], { highway: "footway", level: "-1" }),
+  ];
+  const data = buildStation(station, lift, "");
+
+  test("takes both lift ends from the entrance's own level tag", () => {
+    expect(data.entrances[0]).toMatchObject({ ref: "C", level: -1, liftTo: 0 });
+  });
+
+  test("counts the lift ride in the path time", () => {
+    const p = data.paths.find((x) => x.profile === "fastest");
+    expect(p?.seconds).toBeGreaterThanOrEqual(45);
+  });
+});

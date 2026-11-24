@@ -16,6 +16,7 @@ import type { WalkItem } from "@/lib/guidance";
 import { exitSign, legLine, levelName, trainEndPoint } from "@/lib/guidance";
 import type { LngLat, StationData } from "@/lib/station-types";
 import { DATA_VERSION, loadStation, useStationIndex } from "@/lib/stations";
+import { walkGeometry } from "@/lib/trip-walk";
 import type { Itinerary } from "@/lib/transitous";
 
 interface Props {
@@ -59,8 +60,12 @@ function englishLabels(map: MlMap) {
 
 /** Kind filters of the floor-dependent layers; the level filter is added to these. */
 const BASE_FILTER: Record<string, maplibregl.FilterSpecification> = {
-  "indoor-area": ["==", ["geometry-type"], "Polygon"],
-  "indoor-outline": ["==", ["geometry-type"], "Polygon"],
+  "indoor-area": ["all", ["==", ["geometry-type"], "Polygon"], ["!=", ["get", "kind"], "building"]],
+  "indoor-outline": [
+    "all",
+    ["==", ["geometry-type"], "Polygon"],
+    ["!=", ["get", "kind"], "building"],
+  ],
   "indoor-line": [
     "all",
     ["==", ["geometry-type"], "LineString"],
@@ -82,7 +87,12 @@ const BASE_FILTER: Record<string, maplibregl.FilterSpecification> = {
     ["in", ["get", "kind"], ["literal", ["stairs", "escalator", "elevator"]]],
   ],
   "indoor-poi": ["all", ["==", ["get", "kind"], "poi"], ["has", "name"]],
-  "indoor-room-label": ["all", ["==", ["geometry-type"], "Polygon"], ["has", "name"]],
+  "indoor-room-label": [
+    "all",
+    ["==", ["geometry-type"], "Polygon"],
+    ["has", "name"],
+    ["!=", ["get", "kind"], "building"],
+  ],
   "indoor-elevator": [
     "all",
     ["==", ["geometry-type"], "Point"],
@@ -92,6 +102,7 @@ const BASE_FILTER: Record<string, maplibregl.FilterSpecification> = {
 
 /** Our symbol layers stay visible underground; the basemap's are hidden there. */
 const OUR_LAYERS = new Set([
+  "building-label",
   "indoor-poi",
   "indoor-room-label",
   "indoor-vertical-label",
@@ -171,6 +182,24 @@ function addOverlays(map: MlMap, dark: boolean) {
       "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2, 16, 6],
       "line-opacity": 0.55,
     },
+  });
+  // Named buildings and malls: a tinted footprint with a strong edge and the name, on every
+  // floor, so it is clear when the path runs inside one.
+  map.addLayer({
+    id: "building-fill",
+    type: "fill",
+    source: "indoor",
+    minzoom: INDOOR_ZOOM,
+    filter: ["==", ["get", "kind"], "building"],
+    paint: { "fill-color": dark ? "#1e293b" : "#e2e8f0", "fill-opacity": dark ? 0.75 : 0.6 },
+  });
+  map.addLayer({
+    id: "building-outline",
+    type: "line",
+    source: "indoor",
+    minzoom: INDOOR_ZOOM,
+    filter: ["==", ["get", "kind"], "building"],
+    paint: { "line-color": dark ? "#94a3b8" : "#475569", "line-width": 2 },
   });
   map.addLayer({
     id: "indoor-area",
@@ -367,6 +396,26 @@ function addOverlays(map: MlMap, dark: boolean) {
     },
   });
   map.addLayer({
+    id: "building-label",
+    type: "symbol",
+    source: "indoor",
+    minzoom: 16,
+    filter: ["==", ["get", "kind"], "building"],
+    layout: {
+      "text-field": ["get", "name"],
+      "text-font": FONT_BOLD,
+      "text-size": 13,
+      "text-max-width": 9,
+      "text-optional": true,
+    },
+    paint: {
+      "text-color": fg,
+      "text-halo-color": halo,
+      "text-halo-width": 2,
+      "text-opacity": 0.85,
+    },
+  });
+  map.addLayer({
     id: "indoor-poi",
     type: "symbol",
     source: "indoor",
@@ -388,7 +437,7 @@ function addOverlays(map: MlMap, dark: boolean) {
     id: "indoor-vertical-label",
     type: "symbol",
     source: "indoor",
-    minzoom: 17,
+    minzoom: 17.5,
     filter: BASE_FILTER["indoor-vertical-label"],
     layout: {
       "symbol-placement": "line-center",
@@ -433,7 +482,7 @@ function addOverlays(map: MlMap, dark: boolean) {
     id: "indoor-elevator-label",
     type: "symbol",
     source: "indoor",
-    minzoom: 17,
+    minzoom: 18,
     filter: BASE_FILTER["indoor-elevator"],
     layout: {
       "text-field": ["concat", "Lift", levelRange],
@@ -714,9 +763,20 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     if (!map || !ready) return;
     (map.getSource("indoor") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
-      features: shown.flatMap((s) =>
-        s.indoor.features.filter((f) => f.properties.kind !== "entrance"),
-      ),
+      // Stations near each other share buildings: draw each building once.
+      features: (() => {
+        const seen = new Set<string>();
+        return shown.flatMap((s) =>
+          s.indoor.features.filter((f) => {
+            if (f.properties.kind === "entrance") return false;
+            if (f.properties.kind !== "building") return true;
+            const key = `${f.properties.name}|${JSON.stringify(f.geometry.coordinates).slice(0, 60)}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          }),
+        );
+      })(),
     } as GeoJSON.FeatureCollection);
     const used = new Set(
       guides.flatMap((g) => [g.board?.entrance.id, g.alight?.entrance.id]).filter(Boolean),
@@ -772,11 +832,26 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    const features: GeoJSON.Feature[] = (itinerary?.legs ?? []).map((leg) => ({
-      type: "Feature",
-      properties: { mode: leg.mode, color: modeColor(leg.mode) },
-      geometry: { type: "LineString", coordinates: legLine(leg) },
-    }));
+    // A walk next to a guided station is drawn from the exit (to the entrance) the app chose,
+    // not along the routing engine's own way through the station: the map must match the steps.
+    const byLeg = new Map(guides.map((g) => [g.legIndex, g]));
+    const features: GeoJSON.Feature[] = (itinerary?.legs ?? []).map((leg, i) => {
+      const exit = byLeg.get(i - 1)?.alight?.entrance;
+      const entrance = byLeg.get(i + 1)?.board?.entrance;
+      const coordinates =
+        leg.mode === "WALK" && (exit || entrance)
+          ? walkGeometry(
+              leg,
+              exit ? [exit.lng, exit.lat] : undefined,
+              entrance ? [entrance.lng, entrance.lat] : undefined,
+            )
+          : legLine(leg);
+      return {
+        type: "Feature",
+        properties: { mode: leg.mode, color: modeColor(leg.mode) },
+        geometry: { type: "LineString", coordinates },
+      };
+    });
     (map.getSource("route") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
       features,
@@ -935,6 +1010,10 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     for (const g of guides) {
       for (const guide of [g.board, g.alight]) {
         for (const v of guide?.line ?? []) if (v[2] !== null) set.add(v[2]);
+        for (const st of guide?.steps ?? []) {
+          if (st.fromLevel !== null) set.add(st.fromLevel);
+          if (st.toLevel !== null) set.add(st.toLevel);
+        }
         if (guide?.platform.level != null) set.add(guide.platform.level);
       }
     }

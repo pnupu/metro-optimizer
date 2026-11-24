@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { guideItinerary } from "./guidance";
 import type { StationData } from "./station-types";
 import type { Itinerary, Leg } from "./transitous";
-import { cut, tripWalkthrough } from "./trip-walk";
+import { cut, tripWalkthrough, walkGeometry } from "./trip-walk";
 
 const encode = (pts: [number, number][]) => {
   let out = "";
@@ -219,5 +219,31 @@ describe("cut", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("walkGeometry", () => {
+  test("starts at the exit and has no repeated points where pieces join", () => {
+    const leg = itinerary.legs[2] as Leg;
+    const line = walkGeometry(leg, [24.96, 60.1705]);
+    expect(line[0]).toEqual([24.96, 60.1705]);
+    const repeats = line.filter(
+      (p, i) => i > 0 && p[0] === line[i - 1]?.[0] && p[1] === line[i - 1]?.[1],
+    );
+    expect(repeats).toEqual([]);
+  });
+});
+
+describe("lift exit", () => {
+  test("ends the way out with the lift ride up to the street", () => {
+    const withLift = new Map(stations);
+    const s2 = stations.get("s2") as StationData;
+    withLift.set("s2", {
+      ...s2,
+      entrances: s2.entrances.map((e) => ({ ...e, level: -1, liftTo: 0 })),
+    });
+    const [g] = guideItinerary(itinerary.legs, "fastest", (id) => withLift.get(id));
+    expect(g?.alight?.steps.at(-1)).toMatchObject({ mode: "elevator", fromLevel: -1, toLevel: 0 });
+    expect(g?.board?.steps[0]?.mode).toBe("walk");
   });
 });

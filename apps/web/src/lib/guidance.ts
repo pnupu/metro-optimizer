@@ -15,6 +15,7 @@ import type {
   StationData,
   StationPath,
 } from "./station-types";
+import { ELEVATOR_SECONDS } from "./station-types";
 
 export type TrainEnd = "front" | "middle" | "back";
 
@@ -140,6 +141,13 @@ export function reverseSteps(steps: PathStep[], lineLength: number): PathStep[] 
   }));
 }
 
+function entranceLift(station: StationData, id: string) {
+  const e = station.entrances.find((x) => x.id === id);
+  return e?.liftTo !== undefined && e.level !== null
+    ? { top: e.liftTo, bottom: e.level }
+    : undefined;
+}
+
 function guideFor(
   station: StationData,
   place: Place,
@@ -158,8 +166,22 @@ function guideFor(
   const entrance = station.entrances.find((e) => e.id === choice.path.entrance);
   if (!entrance) return undefined;
   const line = direction === "in" ? choice.path.line : [...choice.path.line].reverse();
-  const steps =
-    direction === "in" ? choice.path.steps : reverseSteps(choice.path.steps, line.length);
+  let steps = direction === "in" ? choice.path.steps : reverseSteps(choice.path.steps, line.length);
+  const lift = entranceLift(station, choice.path.entrance);
+  if (lift) {
+    // The entrance itself is a lift: ride it between the street and the path's first floor.
+    const at = direction === "in" ? 0 : line.length - 1;
+    const ride: PathStep = {
+      mode: "elevator",
+      fromLevel: direction === "in" ? lift.top : lift.bottom,
+      toLevel: direction === "in" ? lift.bottom : lift.top,
+      meters: 0,
+      seconds: ELEVATOR_SECONDS,
+      a: at,
+      b: at,
+    };
+    steps = direction === "in" ? [ride, ...steps] : [...steps, ride];
+  }
   return {
     station,
     platform,
@@ -263,11 +285,12 @@ export function exitSign(
   // An unlettered exit is already titled by its street: do not say the street twice.
   const where = [e.ref ? e.street : undefined, e.place].filter(Boolean).join(" · ") || undefined;
   const signs = e.signs ?? [];
+  const lift = e.liftTo !== undefined ? " (lift)" : "";
   const title = e.ref
-    ? `${word} ${e.ref}`
+    ? `${word} ${e.ref}${lift}`
     : e.street
-      ? `${word} at ${e.street}`
-      : `Unlettered ${word.toLowerCase()}`;
+      ? `${word} at ${e.street}${lift}`
+      : `Unlettered ${word.toLowerCase()}${lift}`;
   // The station's own sign text is best; else the street the exit opens onto.
   const hint = signs.length > 0 ? signs.slice(0, 2).join(", ") : e.street;
   const short = e.ref
@@ -328,7 +351,7 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
       guide.direction === "in"
         ? `${sign.title}${sign.where ? ` · ${sign.where}` : ""}: go in here`
         : `${sign.title}: you come out at ${sign.where ?? "street level"}`,
-    level: guide.entrance.level,
+    level: guide.entrance.liftTo ?? guide.entrance.level,
     points: [entrance],
     kind: "entrance",
   };
