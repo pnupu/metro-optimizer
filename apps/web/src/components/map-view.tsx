@@ -651,16 +651,20 @@ function addOverlays(map: MlMap, dark: boolean) {
       "circle-stroke-width": 3,
     },
   });
-  map.addLayer({
-    id: "indoor-3d-shade",
-    type: "background",
-    minzoom: INDOOR_ZOOM - 0.5,
-    layout: { visibility: "none" },
-    paint: {
-      "background-color": dark ? "#0f1823" : "#eaf0f4",
-      "background-opacity": dark ? 0.64 : 0.78,
+  // Below the app's own layers: it mutes only the basemap, not the trip's markers and route.
+  map.addLayer(
+    {
+      id: "indoor-3d-shade",
+      type: "background",
+      minzoom: INDOOR_ZOOM - 0.5,
+      layout: { visibility: "none" },
+      paint: {
+        "background-color": dark ? "#0f1823" : "#eaf0f4",
+        "background-opacity": dark ? 0.64 : 0.78,
+      },
     },
-  });
+    "underground-dim",
+  );
 }
 
 function Key({
@@ -745,6 +749,9 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
       addOverlays(map, darkRef.current);
       setReady((n) => n + 1);
     });
+    // After a lost WebGL context (e.g. iOS Safari in the background), MapLibre rebuilds the style
+    // but drops custom layers; a new `ready` adds the 3D stack and labels again.
+    map.on("webglcontextrestored", () => setReady((n) => n + 1));
     const onZoom = () => setZoom(map.getZoom());
     map.on("zoomend", onZoom);
     mapRef.current = map;
