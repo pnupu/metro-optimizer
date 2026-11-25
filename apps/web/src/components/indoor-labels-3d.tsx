@@ -6,6 +6,7 @@ import type { IndoorLabel3d } from "@/lib/indoor-3d";
 const LAYER = "indoor-3d-labels";
 const badges = {
   destination: "border-red-200 bg-red-700 text-white",
+  origin: "border-green-200 bg-green-700 text-white",
   "current-floor":
     "border-white bg-slate-900 text-white dark:border-slate-900 dark:bg-white dark:text-slate-900",
   route: "border-orange-300 bg-orange-950 text-white",
@@ -18,6 +19,7 @@ const badges = {
 
 const zoomFor = {
   destination: 15,
+  origin: 15,
   "current-floor": 15,
   route: 15.7,
   floor: 15,

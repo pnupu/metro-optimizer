@@ -185,6 +185,22 @@ describe("street links and raised labels", () => {
       floorHeight(-2, -2) + 0.6,
     );
   });
+
+  test("a pin with no known floor stays on the current floor", () => {
+    const point: [number, number] = [24.93, 60.17];
+    const labels = build3dLabels(
+      station,
+      [],
+      -2,
+      -2,
+      [{ kind: "route", text: "Board", point, level: null }],
+      new Set(),
+      new Map(),
+    );
+    expect(labels.find((label) => label.text === "Board")?.height).toBeCloseTo(
+      floorHeight(-2, -2) + 0.6,
+    );
+  });
 });
 
 test("highlights a walkthrough lift as a raised connection", () => {

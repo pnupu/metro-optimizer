@@ -276,14 +276,22 @@ export interface IndoorLabel3d {
   text: string;
   anchors: LngLat[];
   height: number;
-  kind: "floor" | "current-floor" | "entrance" | "street" | "route" | "destination" | "detail";
+  kind:
+    | "floor"
+    | "current-floor"
+    | "entrance"
+    | "street"
+    | "route"
+    | "origin"
+    | "destination"
+    | "detail";
 }
 
 export interface RoutePin3d {
   text: string;
   point: LngLat;
   level: number | null;
-  kind: "route" | "destination";
+  kind: "route" | "origin" | "destination";
 }
 
 const connectionName: Record<string, string> = {
@@ -358,9 +366,11 @@ export function build3dLabels(
       });
   }
   return [
+    // A pin with no known floor (some platforms have no level in OSM) stays on the current floor,
+    // since the flat pins are hidden in 3D.
     ...pins.flatMap(({ level, point, text, kind }) =>
-      level !== null && level <= current
-        ? [{ text, kind, anchors: [point], height: height(level) }]
+      level === null || level <= current
+        ? [{ text, kind, anchors: [point], height: height(level ?? current) }]
         : [],
     ),
     ...Array.from(floors, ([level, anchors]): IndoorLabel3d => ({

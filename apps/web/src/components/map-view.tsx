@@ -958,7 +958,8 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           exitPoint && [exitPoint[0], exitPoint[1]],
           sign.title,
           guide.poi?.level ?? liftTo ?? level ?? exitPoint?.[2] ?? null,
-          guide.poi ? "destination" : "route",
+          // A mapped shop is the trip's start when the guide walks into the station.
+          guide.poi ? (out ? "destination" : "origin") : "route",
           goalPoint,
         );
         for (const step of guide.steps) {
