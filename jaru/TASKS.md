@@ -19,5 +19,6 @@ Next: —
 | T006 | Indoor routing to shops in buildings joined to a station (OSM)                    | Done  | T005  | `5980197`; live run Swing House → Dif Döner, 33 tests   |
 | T007 | 3D view of multi-floor indoor maps (OSM)                                          | Done  | T006  | `2eb4162`; live run Swing House → Dif Döner, 40 tests   |
 | T008 | Better 3D view (Codex gpt-6.2-sol): floor labels, street links, readability       | Done  | T007  | `cf00695`, `4799cbb`; review 2 found, 2 fixed; 45 tests |
+| T009 | 3D view round 2 (Codex gpt-6.2-sol): route-first, readable floors, fewer labels   | Done  | T008  | `538be24`, `2c9a6cc`; review 2 found, 2 fixed; 42 tests |
 
 Later: —
