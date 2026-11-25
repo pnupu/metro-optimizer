@@ -9,13 +9,15 @@ Done: every row below is Done, the code is on `origin/main`, and the build is li
 
 Next: —
 
-| ID   | Task                                                                              | State | Needs | Evidence                                              |
-| ---- | --------------------------------------------------------------------------------- | ----- | ----- | ----------------------------------------------------- |
-| T001 | Trip planner on Transitous with station data from OSM and HSL GTFS                | Done  | —     | `9131ac0`; live run Kamppi → Itis                     |
-| T002 | Follow-signs directions (city guide PDFs for 11 stations) and clearer indoor maps | Done  | T001  | `bfbb86a`; 19 tests                                   |
-| T003 | Floor-by-floor walkthrough of station paths                                       | Done  | T002  | `2bd9f3b`; live run Matinkylä                         |
-| T004 | One walkthrough for the whole trip                                                | Done  | T003  | `e35ea38`; 22-step live run                           |
-| T005 | Map follows the chosen exit; lift exits; building outlines                        | Done  | T004  | `22e61df`; Rautatientori and Tapiola runs             |
-| T006 | Indoor routing to shops in buildings joined to a station (OSM)                    | Done  | T005  | `5980197`; live run Swing House → Dif Döner, 33 tests |
+| ID   | Task                                                                              | State | Needs | Evidence                                                |
+| ---- | --------------------------------------------------------------------------------- | ----- | ----- | ------------------------------------------------------- |
+| T001 | Trip planner on Transitous with station data from OSM and HSL GTFS                | Done  | —     | `9131ac0`; live run Kamppi → Itis                       |
+| T002 | Follow-signs directions (city guide PDFs for 11 stations) and clearer indoor maps | Done  | T001  | `bfbb86a`; 19 tests                                     |
+| T003 | Floor-by-floor walkthrough of station paths                                       | Done  | T002  | `2bd9f3b`; live run Matinkylä                           |
+| T004 | One walkthrough for the whole trip                                                | Done  | T003  | `e35ea38`; 22-step live run                             |
+| T005 | Map follows the chosen exit; lift exits; building outlines                        | Done  | T004  | `22e61df`; Rautatientori and Tapiola runs               |
+| T006 | Indoor routing to shops in buildings joined to a station (OSM)                    | Done  | T005  | `5980197`; live run Swing House → Dif Döner, 33 tests   |
+| T007 | 3D view of multi-floor indoor maps (OSM)                                          | Done  | T006  | `2eb4162`; live run Swing House → Dif Döner, 40 tests   |
+| T008 | Better 3D view (Codex gpt-6.2-sol): floor labels, street links, readability       | Done  | T007  | `cf00695`, `4799cbb`; review 2 found, 2 fixed; 45 tests |
 
 Later: —
