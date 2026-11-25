@@ -1,384 +1,405 @@
-/**
- * Shapes for the 3D view of multi-floor indoor maps. MapLibre raises only polygons
- * (fill-extrusion), so walkways and the path become narrow strips, and stairs, escalators and
- * lifts become columns between their floors.
- */
-import type { Entrance, IndoorFeature, LngLat, PathVertex, StationData } from "./station-types";
+import { cumulative, distance, projectFraction } from "./geo";
+import type { IndoorProps, LngLat, PathStep, PathVertex, StationData } from "./station-types";
 
-/** Height of one floor in the 3D view, metres (a little more than real, to see between). */
-export const FLOOR_HEIGHT = 8;
-const SLAB = 0.6;
-export const STREET_LINK = "#0e7490";
+const FLOOR_SPACING = 3.4;
+const MIN_LEVEL = -20;
+const PLATE_MARGIN = 5;
+const CONTEXT_RADIUS = 20;
+export const ROUTE_LIFT = 0.24;
 
-export const floorHeight = (level: number, lowest: number) => (level - lowest + 1) * FLOOR_HEIGHT;
-
+export const floorHeight = (level: number, lowest: number) => (level - lowest + 1) * FLOOR_SPACING;
 export const floorNumber = (level: number) => (level < 0 ? `−${-level}` : String(level));
 
-export interface Shape3d {
-  type: "Feature";
-  properties: { color: string; base: number; top: number };
-  geometry: { type: "Polygon"; coordinates: LngLat[][] };
+export function floorLabel3d(level: number, names?: ReadonlyMap<number, string>): string {
+  const name = names?.get(level);
+  if (name && !/^[−-]?\d+[.,]\d+$/.test(name.trim())) return name;
+  const number = floorNumber(Math.trunc(level));
+  return Number.isInteger(level) ? number : `${number} mezz.`;
 }
 
-/** The part of the path the walkthrough shows now, drawn in yellow on its floor. */
-export interface Active3d {
-  points: LngLat[];
-  level: number | null;
-  /** The real elevations of a walkthrough step that changes floor. */
-  line?: PathVertex[];
-}
-
-interface Palette {
-  floor: string;
-  floorDim: string;
-  room: string;
-  roomDim: string;
-  platform: string;
-  platformDim: string;
-  stairs: string;
-  escalator: string;
-  lift: string;
-  path: string;
-  active: string;
-}
-
-export const palette = (dark: boolean): Palette => ({
-  floor: dark ? "#8299b4" : "#eef5ff",
-  floorDim: dark ? "#344054" : "#cbd5e1",
-  room: dark ? "#8a7350" : "#fbe7cc",
-  roomDim: dark ? "#4a3f2e" : "#e7dccb",
-  platform: "#ffb38f",
-  platformDim: dark ? "#8a5a44" : "#f1c9b5",
-  stairs: "#7c3aed",
-  escalator: "#2563eb",
-  lift: "#059669",
-  path: "#ff6319",
-  active: "#facc15",
-});
-
-/** A rectangle of `width` metres around the segment a→b. */
-export function strip(a: LngLat, b: LngLat, width: number): LngLat[] {
-  const k = Math.cos((a[1] * Math.PI) / 180);
-  const dx = (b[0] - a[0]) * k;
-  const dy = b[1] - a[1];
-  const len = Math.hypot(dx, dy) || 1e-9;
-  // Half the width as a perpendicular, back in degrees.
-  const half = width / 2 / 111_320;
-  const px = (-dy / len) * half;
-  const py = (dx / len) * half;
-  const ox = px / k;
-  return [
-    [a[0] + ox, a[1] + py],
-    [b[0] + ox, b[1] + py],
-    [b[0] - ox, b[1] - py],
-    [a[0] - ox, a[1] - py],
-    [a[0] + ox, a[1] + py],
-  ];
-}
-
-/** A square of `size` metres around a point. */
-function square(p: LngLat, size: number): LngLat[] {
-  const h = size / 2 / 111_320;
-  const w = h / Math.cos((p[1] * Math.PI) / 180);
-  return [
-    [p[0] - w, p[1] - h],
-    [p[0] + w, p[1] - h],
-    [p[0] + w, p[1] + h],
-    [p[0] - w, p[1] + h],
-    [p[0] - w, p[1] - h],
-  ];
-}
-
-const shape = (ring: LngLat[], color: string, base: number, top: number): Shape3d => ({
-  type: "Feature",
-  properties: { color, base, top },
-  geometry: { type: "Polygon", coordinates: [ring] },
-});
-
-function lineCenter(points: LngLat[]): LngLat | undefined {
-  const middle = Math.floor(points.length / 2);
-  const a = points[middle];
-  const b = points[middle - 1];
-  if (!a || !b || points.length % 2 !== 0) return a;
-  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-}
-
-/** Indoor levels below this are data errors (or the building marker's -99). */
-const MIN_LEVEL = -20;
-
-/** An entrance on OSM level zero, an explicit street lift, or a route's street handoff. */
-function streetLanding(entrance: Entrance, current: number, used: boolean): number | null {
-  const { level, liftTo } = entrance;
-  const landing = used ? (liftTo ?? level) : liftTo === 0 || level === 0 ? 0 : null;
-  if (landing !== null && landing <= current) return landing;
-  return liftTo === 0 && level !== null && level <= current ? level : null;
-}
-
-/**
- * The lowest floor among the features and path vertices. Pass a value computed from the route's
- * stations to keep the floors still while the map pans past other stations.
- */
-export function lowestFloor(stations: StationData[], paths: PathVertex[][]): number {
-  let low = 0;
-  for (const s of stations) {
-    for (const f of s.indoor.features) {
-      const l = f.properties.lmin;
-      if (l >= MIN_LEVEL && l < low) low = l;
-    }
-    for (const { level, liftTo } of s.entrances)
-      for (const l of [level, liftTo]) if (l != null && l >= MIN_LEVEL && l < low) low = l;
+/** Neighboring buildings can have different refs for the same OSM level. */
+export function floorNames3d(
+  pois: { level: number | null; floor?: string }[],
+): Map<number, string> {
+  const names = new Map<number, string>();
+  const ambiguous = new Set<number>();
+  for (const { level, floor } of pois) {
+    const name = floor?.trim();
+    if (level === null || !name || ambiguous.has(level)) continue;
+    if (names.has(level) && names.get(level) !== name) {
+      ambiguous.add(level);
+      names.delete(level);
+    } else names.set(level, name);
   }
-  for (const line of paths)
-    for (const v of line) if (v[2] !== null && v[2] >= MIN_LEVEL && v[2] < low) low = v[2];
-  return low;
+  return names;
 }
 
-export function build3d(
-  stations: StationData[],
-  paths: PathVertex[][],
-  current: number,
-  dark: boolean,
-  active?: Active3d,
-  /** The floor that sits one floor above the ground; see `lowestFloor`. */
-  lowest = lowestFloor(stations, paths),
-  streetEntrances: ReadonlySet<string> = new Set(),
-): { type: "FeatureCollection"; features: Shape3d[] } {
-  const c = palette(dark);
-  const features = stations.flatMap((s) => s.indoor.features);
-  // Floors float above the street map: the lowest floor sits one floor above the ground.
-  const z = (level: number) => floorHeight(level, lowest);
-  const out: Shape3d[] = [];
-  const slab = (ring: LngLat[], color: string, level: number) =>
-    out.push(shape(ring, color, z(level), z(level) + SLAB));
+export type Point3d = [lng: number, lat: number, height: number];
+type LevelPoint = [lng: number, lat: number, level: number];
 
-  // Cut-away: floors above the current one would hide it, so they are left out, and columns
-  // stop one floor above it so the next connection stays visible.
-  for (const f of features as IndoorFeature[]) {
-    const { kind, lmin } = f.properties;
-    if (kind === "building" || lmin < MIN_LEVEL || lmin > current) continue;
-    const lmax = Math.min(f.properties.lmax, current + 1);
-    const g = f.geometry;
-    if (g.type === "Polygon") {
-      // Floors below the current one are dimmed, rooms and platforms too.
-      const here = lmin === current;
-      const color =
-        kind === "platform"
-          ? here
-            ? c.platform
-            : c.platformDim
-          : kind === "room"
-            ? here
-              ? c.room
-              : c.roomDim
-            : here
-              ? c.floor
-              : c.floorDim;
-      // All rings, so courtyards and atriums stay open.
-      out.push({
-        type: "Feature",
-        properties: { color, base: z(lmin), top: z(lmin) + SLAB },
-        geometry: { type: "Polygon", coordinates: g.coordinates },
+const xy = ([lng, lat]: PathVertex | LngLat): LngLat => [lng, lat];
+const atLevel = (p: PathVertex | LngLat, level: number): LevelPoint => [...xy(p), level];
+const mix = (a: LngLat, b: LngLat, t: number): LngLat => [
+  a[0] + (b[0] - a[0]) * t,
+  a[1] + (b[1] - a[1]) * t,
+];
+
+const valid = (level: number) => level >= MIN_LEVEL && Number.isFinite(level);
+const knownLevel = (level: number | null | undefined) => level != null && valid(level);
+
+export interface Route3d {
+  line: PathVertex[];
+  steps: PathStep[];
+  fallbackLevel: number;
+}
+
+interface RouteSection {
+  points: LevelPoint[];
+  step?: PathStep;
+  /** A shaft between the real walk-in and walk-out points of an OSM point lift. */
+  shaft?: [LevelPoint, LevelPoint];
+}
+
+function liftSection(a: LevelPoint, b: LevelPoint, lift: LngLat, step: PathStep): RouteSection {
+  const shaft: [LevelPoint, LevelPoint] = [atLevel(lift, a[2]), atLevel(lift, b[2])];
+  return { points: [a, ...shaft, b], shaft, step };
+}
+
+/** Use the same step indices as the walkthrough, even if the walk is in reverse. */
+export function routeSections3d(
+  { line, steps, fallbackLevel }: Route3d,
+  lifts: LngLat[] = [],
+): RouteSection[] {
+  let level = line.find((p) => knownLevel(p[2]))?.[2] ?? fallbackLevel;
+  const vertices = line.map((p) => {
+    if (p[2] != null && valid(p[2])) level = p[2];
+    return atLevel(p, level);
+  });
+  const sections: RouteSection[] = [];
+  // Point steps may share their index with a walk on either side. Reserve the actual
+  // level-changing edge before assigning the walking steps.
+  const taken = new Set<number>();
+  for (const step of steps) {
+    const { a, b, fromLevel, toLevel, mode } = step;
+    const start = vertices[a];
+    if (
+      !start ||
+      mode === "walk" ||
+      fromLevel == null ||
+      toLevel == null ||
+      fromLevel === toLevel
+    ) {
+      continue;
+    }
+    const end = vertices[b];
+    if (!end) continue;
+    let first = a;
+    let last = b;
+    if (a === b) {
+      if (start[2] === fromLevel && vertices[a + 1]?.[2] === toLevel) last++;
+      else if (vertices[a - 1]?.[2] === fromLevel && start[2] === toLevel) first--;
+    }
+    const startPoint = atLevel(vertices[first] ?? start, fromLevel);
+    const endPoint = atLevel(vertices[last] ?? end, toLevel);
+    for (let i = first; i < last; i++) taken.add(i);
+    if (mode === "elevator") {
+      // A lift can be stored as one vertex beside an edge that also includes a walk.
+      // Snap only to mapped lifts next to that edge, or use the step vertex.
+      const nearest = (p: LngLat) => {
+        const a = xy(startPoint);
+        const b = xy(endPoint);
+        return distance(p, mix(a, b, projectFraction(p, a, b)));
+      };
+      const nearby = lifts
+        .filter((p) => nearest(p) <= 3)
+        .toSorted((a, b) => nearest(a) - nearest(b));
+      sections.push(liftSection(startPoint, endPoint, nearby[0] ?? xy(start), step));
+    } else {
+      const points = vertices.slice(first, last + 1).map(xy);
+      const lengths = cumulative(points);
+      const total = lengths.at(-1) ?? 0;
+      // OSM commonly tags only the landings. Spread the rise along the mapped flight.
+      sections.push({
+        step,
+        points:
+          total > 0
+            ? points.map((p, i) =>
+                atLevel(p, fromLevel + (toLevel - fromLevel) * (lengths[i]! / total)),
+              )
+            : [startPoint, endPoint],
       });
-    } else if (g.type === "LineString") {
-      const pts = g.coordinates;
-      const vertical = kind === "stairs" || kind === "escalator" || kind === "elevator";
-      if (!vertical && kind !== "footway" && kind !== "platform") continue;
-      const color =
-        kind === "stairs"
-          ? c.stairs
-          : kind === "escalator"
-            ? c.escalator
-            : kind === "elevator"
-              ? c.lift
-              : kind === "platform"
-                ? lmin === current
-                  ? c.platform
-                  : c.platformDim
-                : lmin === current
-                  ? c.floor
-                  : c.floorDim;
-      // Raising the whole footprint of a long staircase makes it look like a wall.
-      // Keep the footprint on its floor and show the connection with a narrow post.
-      const anchor = vertical ? lineCenter(pts) : undefined;
-      if (anchor && lmax > lmin)
-        out.push(shape(square(anchor, 1.8), color, z(lmin), z(lmax) + SLAB));
-      for (let i = 1; i < pts.length; i++) {
-        const a = pts[i - 1] as LngLat;
-        const b = pts[i] as LngLat;
-        slab(strip(a, b, vertical ? 2 : kind === "platform" ? 4 : 3), color, lmin);
-      }
-    } else if (kind === "elevator") {
-      out.push(shape(square(g.coordinates, 2.5), c.lift, z(lmin), z(lmax) + SLAB));
     }
   }
 
-  for (const station of stations) {
-    for (const entrance of station.entrances) {
-      const landing = streetLanding(entrance, current, streetEntrances.has(entrance.id));
-      if (landing === null) continue;
-      const point: LngLat = [entrance.lng, entrance.lat];
-      const used = streetEntrances.has(entrance.id);
-      const color = used ? c.path : STREET_LINK;
-      out.push(
-        shape(square(point, used ? 4 : 2.8), color, 0, 0.7),
-        shape(square(point, used ? 1.7 : 1.2), color, 0, z(landing) + SLAB),
-      );
-    }
+  const walkSteps = new Map<number, PathStep>();
+  for (const step of steps) {
+    for (let i = step.a; i < step.b; i++) walkSteps.set(i, step);
   }
-
-  // The path: a strip on each visible floor, and a column where it changes floor.
-  const drawPath = (line: PathVertex[], highlighted: boolean) => {
-    const width = highlighted ? 2.8 : 1.8;
-    const height = highlighted ? 1 : 0.45;
-    const run = (a: LngLat, b: LngLat, level: number, color: string) => {
-      if (a[0] === b[0] && a[1] === b[1]) return;
-      const base = z(level) + SLAB;
-      if (highlighted) out.push(shape(strip(a, b, width + 1), "#78350f", base, base + 0.65));
-      out.push(shape(strip(a, b, width), color, base, base + height));
-    };
-    for (let i = 1; i < line.length; i++) {
-      const [alng, alat, al] = line[i - 1] as PathVertex;
-      const [blng, blat, bl] = line[i] as PathVertex;
-      const known = al ?? bl;
-      if (known === null) continue;
-      const low = Math.min(al ?? known, bl ?? known);
-      const high = Math.max(al ?? known, bl ?? known);
-      if (low > current) continue;
-      const color = highlighted ? c.active : c.path;
-      run([alng, alat], [blng, blat], low, color);
-      if (low !== high) {
-        // Reverse walks still put the column at the upper landing.
-        const upper: LngLat = al === high ? [alng, alat] : [blng, blat];
-        out.push(
-          shape(
-            square(upper, width + 0.4),
-            color,
-            z(low),
-            z(Math.min(high, current + 1)) + SLAB + height,
-          ),
-        );
-      }
-    }
-  };
-  for (const line of paths) drawPath(line, false);
-  if (active?.level != null && active.level <= current) {
-    const { level, points } = active;
-    const point = points[0];
-    if (points.length === 1 && point) {
-      const top = z(level) + SLAB;
-      out.push(shape(square(point, 3.8), c.active, top, top + 1.5));
-    } else drawPath(active.line ?? points.map(([lng, lat]) => [lng, lat, level]), true);
+  for (let i = 0; i + 1 < vertices.length; i++) {
+    if (taken.has(i)) continue;
+    const a = vertices[i]!;
+    const b = vertices[i + 1]!;
+    const step = walkSteps.get(i);
+    const previous = sections.at(-1);
+    if (previous?.step === step && previous?.points.at(-1) === a && a[2] === b[2])
+      previous.points.push(b);
+    else sections.push({ points: [a, b], ...(step ? { step } : {}) });
   }
-  return { type: "FeatureCollection", features: out };
+  return sections;
 }
 
 export interface IndoorLabel3d {
   text: string;
-  anchors: LngLat[];
-  height: number;
-  kind:
-    | "floor"
-    | "current-floor"
-    | "entrance"
-    | "street"
-    | "route"
-    | "origin"
-    | "destination"
-    | "detail";
+  anchors: Point3d[];
+  kind: "floor" | "current-floor" | "entrance" | "route" | "active" | "origin" | "destination";
 }
 
 export interface RoutePin3d {
   text: string;
   point: LngLat;
+  pathPoint?: LngLat;
   level: number | null;
-  kind: "route" | "origin" | "destination";
+  kind: "entrance" | "route" | "origin" | "destination";
 }
 
-const connectionName: Record<string, string> = {
-  elevator: "Lift",
-  escalator: "Escalator",
+export interface Plate3d {
+  level: number;
+  ring: Point3d[];
+  active: boolean;
+}
+
+export interface IndoorScene3d {
+  plates: Plate3d[];
+  context: Point3d[][];
+  route: { points: Point3d[]; active: boolean; ramp: boolean; shaft?: [Point3d, Point3d] }[];
+  labels: IndoorLabel3d[];
+}
+
+function cross(a: LngLat, b: LngLat, p: LngLat) {
+  return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+}
+
+/** A schematic footprint around the mapped area. Add a margin so a narrow path has a plate. */
+export function plateOutline(points: LngLat[], latitude: number): LngLat[] {
+  const hullSide = (sorted: LngLat[]) => {
+    const side: LngLat[] = [];
+    for (const p of sorted) {
+      while (side.length >= 2 && cross(side.at(-2)!, side.at(-1)!, p) <= 0) side.pop();
+      side.push(p);
+    }
+    return side;
+  };
+  const hull = (sorted: LngLat[]) =>
+    hullSide(sorted).slice(0, -1).concat(hullSide(sorted.toReversed()).slice(0, -1));
+  const sort = (points: LngLat[]) => points.toSorted((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const sorted = sort(points);
+  const perimeter = hull(sorted);
+  const dy = PLATE_MARGIN / 111_320;
+  const dx = dy / Math.cos((latitude * Math.PI) / 180);
+  return hull(
+    sort(
+      (perimeter.length > 0 ? perimeter : sorted.slice(0, 1)).flatMap(([x, y]): LngLat[] => [
+        [x - dx, y - dy],
+        [x - dx, y + dy],
+        [x + dx, y - dy],
+        [x + dx, y + dy],
+      ]),
+    ),
+  );
+}
+
+function nearRoute(point: LngLat, segments: [LngLat, LngLat][]): boolean {
+  return segments.some(([a, b]) => {
+    // The angular prefilter avoids distance and projection work for distant features.
+    if (point[1] < Math.min(a[1], b[1]) - 0.0002 || point[1] > Math.max(a[1], b[1]) + 0.0002) {
+      return false;
+    }
+    return distance(point, mix(a, b, projectFraction(point, a, b))) <= CONTEXT_RADIUS;
+  });
+}
+
+const connector = ({ kind }: IndoorProps) =>
+  kind === "escalator" || kind === "stairs" || kind === "elevator";
+
+const outlineKinds = new Set(["platform", "room", "area", "corridor-area"]);
+const stepNames = {
   stairs: "Stairs",
+  escalator: "Escalator",
+  elevator: "Lift",
+  level: "Floor change",
 };
 
-export function build3dLabels(
+export function buildIndoorScene3d(
   station: StationData,
-  paths: PathVertex[][],
+  routes: Route3d[],
   current: number,
-  lowest: number,
   pins: RoutePin3d[],
-  streetEntrances: ReadonlySet<string>,
   floorNames: ReadonlyMap<number, string>,
-): IndoorLabel3d[] {
-  const floors = new Map<number, LngLat[]>();
-  const remember = (level: number, point: LngLat) => {
-    if (level < MIN_LEVEL || level > current) return;
-    const anchors = floors.get(level);
-    if (!anchors) floors.set(level, [point]);
-    else anchors.push(point);
+  active?: { step?: PathStep; points: LngLat[]; level: number | null },
+): IndoorScene3d {
+  const features = station.indoor.features;
+  const lifts = features.flatMap(({ geometry, properties }) =>
+    geometry.type === "Point" && properties.kind === "elevator" ? [geometry.coordinates] : [],
+  );
+  const sections = routes.flatMap((route) => routeSections3d(route, lifts));
+  const floorPoints = new Map<number, LngLat[]>();
+  const floorSegments = new Map<number, [LngLat, LngLat][]>();
+  const remember = (level: number, p: LngLat) => {
+    if (!valid(level)) return;
+    const list = floorPoints.get(level);
+    if (list) list.push(p);
+    else floorPoints.set(level, [p]);
   };
-  const height = (level: number) => floorHeight(level, lowest) + SLAB;
-  const details: IndoorLabel3d[] = [];
-  for (const path of paths)
-    for (const [lng, lat, level] of path) if (level !== null) remember(level, [lng, lat]);
-  for (const { geometry, properties } of station.indoor.features) {
-    const { kind, lmin, lmax, name } = properties;
-    if (lmin < MIN_LEVEL || lmin > current || kind === "building" || kind === "track") continue;
-    const anchor =
-      geometry.type === "Point"
+  for (const { points } of sections) {
+    const first = points[0];
+    const last = points.at(-1);
+    if (!first || !last) continue;
+    remember(first[2], xy(first));
+    remember(last[2], xy(last));
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1]!;
+      const b = points[i]!;
+      if (a[2] !== b[2]) continue;
+      remember(a[2], xy(a));
+      const segment: [LngLat, LngLat] = [xy(a), xy(b)];
+      const list = floorSegments.get(a[2]);
+      if (list) list.push(segment);
+      else floorSegments.set(a[2], [segment]);
+    }
+  }
+  for (const pin of pins) {
+    remember(pin.level ?? current, pin.point);
+    if (pin.pathPoint) remember(pin.level ?? current, pin.pathPoint);
+  }
+  const routeAnchors = new Map([...floorPoints].map(([level, points]) => [level, [...points]]));
+  const routedFloors = new Set(floorPoints.keys());
+  const hasRoute = routedFloors.size > 0;
+  const lowest = lowestFloor(station, routes);
+  const z = (level: number) => floorHeight(level, lowest);
+  const raised = ([lng, lat, level]: LevelPoint): Point3d => [lng, lat, z(level) + ROUTE_LIFT];
+  const context: Point3d[][] = [];
+
+  for (const feature of features) {
+    const { geometry, properties: props } = feature;
+    const { kind, lmin, lmax } = props;
+    if (!valid(lmin) || (hasRoute ? !routedFloors.has(lmin) : lmin > current)) continue;
+    const rings =
+      geometry.type === "Polygon"
         ? geometry.coordinates
-        : lineCenter(
-            geometry.type === "Polygon" ? (geometry.coordinates[0] ?? []) : geometry.coordinates,
-          );
-    if (!anchor) continue;
-    remember(lmin, anchor);
-    const connection = connectionName[kind];
-    if (connection && lmin !== lmax) remember(lmax, anchor);
-    const namedDetail =
-      name && lmin === current && !pins.some((pin) => pin.level === lmin && pin.text === name);
-    if (kind !== "entrance" && (connection || namedDetail)) {
-      const level = connection && lmax <= current ? lmax : lmin;
-      const text =
-        connection && lmin !== lmax
-          ? `${connection} ${floorNumber(lmin)}…${floorNumber(lmax)}`
-          : (connection ?? name);
-      if (text) details.push({ text, anchors: [anchor], height: height(level), kind: "detail" });
+        : geometry.type === "LineString"
+          ? [geometry.coordinates]
+          : [];
+    const around = routeAnchors.get(lmin) ?? [];
+    const segments = floorSegments.get(lmin) ?? [];
+    const isNearby = hasRoute
+      ? (p: LngLat) =>
+          nearRoute(p, segments) || around.some((a) => distance(p, a) <= CONTEXT_RADIUS)
+      : () => true;
+
+    if (connector(props) && lmax > lmin && (hasRoute ? routedFloors.has(lmax) : lmax <= current)) {
+      const first = geometry.type === "Point" ? geometry.coordinates : rings[0]?.[0];
+      const last = geometry.type === "Point" ? geometry.coordinates : rings[0]?.at(-1);
+      if (first && last && isNearby(first))
+        context.push([
+          [...first, z(lmin)],
+          [...last, z(lmax)],
+        ]);
+      continue;
+    }
+    if (!outlineKinds.has(kind) && kind !== "footway") continue;
+    for (const ring of rings) {
+      for (let i = 1; i < ring.length; i++) {
+        const a = ring[i - 1]!;
+        const b = ring[i]!;
+        if (!isNearby(a) || !isNearby(b)) continue;
+        remember(lmin, a);
+        remember(lmin, b);
+        context.push([
+          [...a, z(lmin)],
+          [...b, z(lmin)],
+        ]);
+      }
     }
   }
-  for (const entrance of station.entrances) {
-    const used = streetEntrances.has(entrance.id);
-    const landing = streetLanding(entrance, current, used);
-    const level = landing ?? entrance.level;
-    if (level === null || level > current) continue;
-    const anchor: LngLat = [entrance.lng, entrance.lat];
-    remember(level, anchor);
-    if (used && landing !== null) {
-      details.push({ text: "Street", anchors: [anchor], height: 0.7, kind: "street" });
-    }
-    if (
-      !used ||
-      !pins.some((p) => p.level === level && p.point[0] === anchor[0] && p.point[1] === anchor[1])
-    )
-      details.push({
-        text: entrance.ref ? `Exit ${entrance.ref}` : "Entrance",
-        anchors: [anchor],
-        height: height(level),
-        kind: "entrance",
-      });
-  }
-  return [
-    // A pin with no known floor (some platforms have no level in OSM) stays on the current floor,
-    // since the flat pins are hidden in 3D.
-    ...pins.flatMap(({ level, point, text, kind }) =>
-      level === null || level <= current
-        ? [{ text, kind, anchors: [point], height: height(level ?? current) }]
-        : [],
-    ),
-    ...Array.from(floors, ([level, anchors]): IndoorLabel3d => ({
-      text: floorNames.get(level) ?? floorNumber(level),
+
+  const plates: Plate3d[] = [];
+  const labels: IndoorLabel3d[] = pins.map(({ point, level, text, kind }) => ({
+    text,
+    kind,
+    anchors: [raised(atLevel(point, level ?? current))],
+  }));
+  for (const [level, points] of [...floorPoints].sort(([a], [b]) => a - b)) {
+    const ring = plateOutline(points, station.lat);
+    const height = z(level);
+    plates.push({ level, active: level === current, ring: ring.map((p) => [...p, height]) });
+    const anchors = ring.flatMap((p, i) => {
+      const next = ring[(i + 1) % ring.length]!;
+      return [0.5, 0.25, 0.75].map((t): Point3d => [...mix(p, next, t), height]);
+    });
+    labels.push({
+      text: floorLabel3d(level, floorNames),
       kind: level === current ? "current-floor" : "floor",
       anchors,
-      height: height(level),
-    })),
-    ...details,
+    });
+  }
+  const route = sections.map(({ points, step, shaft }) => {
+    const onStep = active?.step != null && step === active.step;
+    const mode = step?.mode;
+    const from = step?.fromLevel;
+    const to = step?.toLevel;
+    const ramp = (mode === "escalator" || mode === "stairs") && from !== to;
+    if (mode && mode !== "walk" && from != null && to != null && from !== to) {
+      const a = shaft?.[0] ?? points[0]!;
+      const b = shaft?.[1] ?? points.at(-1)!;
+      const p = points.length > 2 && !shaft ? points[Math.floor(points.length / 2)]! : undefined;
+      labels.push({
+        kind: onStep ? "active" : "route",
+        text: `${stepNames[mode]} ${to > from ? "↑" : "↓"} ${floorLabel3d(to, floorNames)}`,
+        anchors: [raised(p ?? atLevel(mix(xy(a), xy(b), 0.5), (a[2] + b[2]) / 2))],
+      });
+    }
+    return {
+      points: points.map(raised),
+      active: onStep,
+      ramp,
+      ...(shaft ? { shaft: [raised(shaft[0]), raised(shaft[1])] as [Point3d, Point3d] } : {}),
+    };
+  });
+  for (const { point, pathPoint, level } of pins) {
+    if (!pathPoint || distance(point, pathPoint) < 0.1) continue;
+    route.push({
+      points: [point, pathPoint].map((p) => raised(atLevel(p, level ?? current))),
+      active: false,
+      ramp: false,
+    });
+  }
+  if (
+    active &&
+    !route.some((section) => section.active) &&
+    active.level !== null &&
+    active.points.length
+  ) {
+    route.push({
+      points: active.points.map((p) => raised(atLevel(p, active.level!))),
+      active: true,
+      ramp: false,
+    });
+  }
+  return { plates, context, route, labels };
+}
+
+export function lowestFloor(station: StationData, routes: Route3d[]): number {
+  const levels = [
+    ...station.levels,
+    ...routes.map(({ fallbackLevel }) => fallbackLevel),
+    ...station.indoor.features.map(({ properties }) => properties.lmin),
+    ...routes.flatMap(({ line, steps }) => [
+      ...line.map((p) => p[2]),
+      ...steps.flatMap((step) => [step.fromLevel, step.toLevel]),
+    ]),
   ];
+  return levels.reduce<number>(
+    (lowest, l) => (l != null && valid(l) ? Math.min(lowest, l) : lowest),
+    0,
+  );
 }

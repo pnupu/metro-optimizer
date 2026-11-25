@@ -8,31 +8,40 @@ import type * as GeoJSON from "geojson";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { IndoorLabels3d } from "@/components/indoor-labels-3d";
+import { IndoorStack3d } from "@/components/indoor-stack-3d";
 import { useTheme } from "@/components/theme-provider";
 import { modeColor } from "@/lib/format";
 import type { MetroGuide } from "@/lib/guidance";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 
 import type { WalkItem } from "@/lib/guidance";
-import { exitSign, legLine, levelName, trainEndPoint } from "@/lib/guidance";
+import {
+  describeStepWithFloorName,
+  exitSign,
+  legLine,
+  levelName,
+  trainEndPoint,
+} from "@/lib/guidance";
 import type { LngLat, StationData } from "@/lib/station-types";
 import {
-  build3d,
-  build3dLabels,
+  buildIndoorScene3d,
   floorHeight,
+  floorLabel3d,
+  floorNames3d,
   floorNumber,
   lowestFloor,
-  STREET_LINK,
-  type IndoorLabel3d,
+  type Route3d,
   type RoutePin3d,
 } from "@/lib/indoor-3d";
 import { DATA_VERSION, loadStation, useStationIndex } from "@/lib/stations";
 import { walkGeometry } from "@/lib/trip-walk";
 import type { Itinerary } from "@/lib/transitous";
+import type { WalkGraph } from "@/lib/walk-graph";
 
 interface Props {
   itinerary?: Itinerary;
   guides: MetroGuide[];
+  graphs: ReadonlyMap<string, WalkGraph>;
   from?: { lat: number; lon: number };
   to?: { lat: number; lon: number };
   /** The floor-by-floor walkthrough of one station path, and the item shown now. */
@@ -190,7 +199,6 @@ function addOverlays(map: MlMap, dark: boolean) {
     "entrances",
     "pins",
     "walk-active",
-    "indoor-3d",
   ]) {
     map.addSource(id, { type: "geojson", data: EMPTY });
   }
@@ -604,21 +612,6 @@ function addOverlays(map: MlMap, dark: boolean) {
       "circle-stroke-width": 4,
     },
   });
-  // 3D view: every floor as stacked slabs, the path and floor changes as raised shapes.
-  map.addLayer({
-    id: "indoor-3d",
-    type: "fill-extrusion",
-    source: "indoor-3d",
-    minzoom: INDOOR_ZOOM - 1,
-    layout: { visibility: "none" },
-    paint: {
-      "fill-extrusion-color": ["get", "color"],
-      "fill-extrusion-base": ["get", "base"],
-      "fill-extrusion-height": ["get", "top"],
-      "fill-extrusion-opacity": 0.98,
-      "fill-extrusion-vertical-gradient": false,
-    },
-  });
   map.addLayer({
     id: "pins",
     type: "circle",
@@ -656,6 +649,16 @@ function addOverlays(map: MlMap, dark: boolean) {
       "circle-color": ["match", ["get", "end"], "from", "#16a34a", "#dc2626"],
       "circle-stroke-color": halo,
       "circle-stroke-width": 3,
+    },
+  });
+  map.addLayer({
+    id: "indoor-3d-shade",
+    type: "background",
+    minzoom: INDOOR_ZOOM - 0.5,
+    layout: { visibility: "none" },
+    paint: {
+      "background-color": dark ? "#0f1823" : "#eaf0f4",
+      "background-opacity": dark ? 0.64 : 0.78,
     },
   });
 }
@@ -696,7 +699,7 @@ function Key({
   );
 }
 
-export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
+export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
   const [ready, setReady] = useState(0);
@@ -788,7 +791,14 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
       near.sort((a, b) => distanceToCenter(a) - distanceToCenter(b));
       void Promise.all(near.map((s) => loadStation(s.id).catch(() => undefined))).then((list) => {
         // A slower, older load must not replace the stations of the current view.
-        if (live && request === latest) setNearby(list.filter((s): s is StationData => !!s));
+        if (live && request === latest) {
+          const next = list.filter((s): s is StationData => !!s);
+          setNearby((previous) =>
+            next.length === previous.length && next.every((s, i) => s === previous[i])
+              ? previous
+              : next,
+          );
+        }
       });
     };
     update();
@@ -822,23 +832,19 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     () =>
       shown.map((station) => {
         const walks = walked.filter(({ guide }) => guide.station.id === station.id);
-        const paths = walks.map(({ line }) => line);
-        const streetEntrances = new Set<string>();
-        const floorNames = new Map<number, string>();
+        const routes = walks.map(({ guide, line }): Route3d => ({
+          line,
+          steps: guide.steps,
+          fallbackLevel: guide.platform.level ?? guide.entrance.level ?? 0,
+        }));
+        const floorNames = floorNames3d(graphs.get(station.id)?.pois ?? []);
         for (const { guide } of walks) {
           const poi = guide.poi;
-          if (!poi) streetEntrances.add(guide.entrance.id);
-          else if (poi.floor && poi.level !== null) floorNames.set(poi.level, poi.floor);
+          if (poi?.floor && poi.level !== null) floorNames.set(poi.level, poi.floor);
         }
-        return {
-          station,
-          paths,
-          streetEntrances,
-          floorNames,
-          lowest: lowestFloor([station], paths),
-        };
+        return { station, routes, floorNames, lowest: lowestFloor(station, routes) };
       }),
-    [shown, walked],
+    [graphs, shown, walked],
   );
   // The floor picker follows the stations near the map centre.
   const levels = useMemo(
@@ -892,7 +898,7 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
   }, [shown, ready, guides]);
 
   // Level filter and the underground shade.
-  const closeIndoor3d = threeD && zoom >= INDOOR_ZOOM && levels.length > 0;
+  const closeIndoor3d = threeD && zoom >= INDOOR_ZOOM - 0.5 && levels.length > 0;
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -916,13 +922,17 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
         );
       }
     }
-    map.setPaintProperty("metro-lines", "line-opacity", underground ? 0.9 : 0.55);
+    map.setPaintProperty(
+      "metro-lines",
+      "line-opacity",
+      underground ? 0.9 : closeIndoor3d ? 0.22 : 0.55,
+    );
     // The street part of the trip is not on this floor.
     const streetOpacity: maplibregl.ExpressionSpecification = [
       "case",
       ["==", ["get", "mode"], "SUBWAY"],
-      1,
-      underground ? 0.3 : 1,
+      closeIndoor3d ? 0.34 : 1,
+      underground ? 0.3 : closeIndoor3d ? 0.6 : 1,
     ];
     map.setPaintProperty("route", "line-opacity", streetOpacity);
     map.setPaintProperty("route-casing", "line-opacity", streetOpacity);
@@ -932,25 +942,38 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     () =>
       walked.map(({ guide, line, end, out }) => {
         // The board / get-off pin marks the train end on the platform, not where the path arrives.
-        const platformPoint = end ? trainEndPoint(guide, end) : out ? line[0] : line.at(-1);
+        const platformArrival = out ? line[0] : line.at(-1);
+        const platformPoint = end ? trainEndPoint(guide, end) : platformArrival;
         const exitPoint = out ? line.at(-1) : line[0];
         const sign = guide.poi
           ? { title: guide.poi.name }
           : exitSign(guide.entrance, out ? "out" : "in");
-        const pins: (RoutePin3d & { flatPoint: LngLat })[] = [];
+        const pins: (RoutePin3d & { flatPoint: LngLat; flatOnly?: true })[] = [];
         const pin = (
           p: LngLat | undefined,
           text: string,
           level: number | null,
           kind: RoutePin3d["kind"] = "route",
           raisedPoint = p,
+          options: { flatOnly?: true; pathPoint?: LngLat } = {},
         ) => {
-          if (p && raisedPoint) pins.push({ flatPoint: p, point: raisedPoint, text, level, kind });
+          if (p && raisedPoint)
+            pins.push({
+              flatPoint: p,
+              point: raisedPoint,
+              text,
+              level,
+              kind,
+              ...options,
+            });
         };
         pin(
           platformPoint && [platformPoint[0], platformPoint[1]],
           out ? `Get off${end ? ` at the ${end}` : ""}` : `Board${end ? ` at the ${end}` : ""}`,
-          guide.platform.level ?? (out ? line[0] : line.at(-1))?.[2] ?? null,
+          guide.platform.level ?? platformArrival?.[2] ?? guide.entrance.level ?? 0,
+          "route",
+          undefined,
+          platformArrival ? { pathPoint: [platformArrival[0], platformArrival[1]] } : {},
         );
         const { lng, lat, level, liftTo } = guide.entrance;
         const goalPoint: LngLat = [lng, lat];
@@ -959,8 +982,9 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           sign.title,
           guide.poi?.level ?? liftTo ?? level ?? exitPoint?.[2] ?? null,
           // A mapped shop is the trip's start when the guide walks into the station.
-          guide.poi ? (out ? "destination" : "origin") : "route",
+          guide.poi ? (out ? "destination" : "origin") : "entrance",
           goalPoint,
+          exitPoint ? { pathPoint: [exitPoint[0], exitPoint[1]] } : {},
         );
         for (const step of guide.steps) {
           if (step.mode === "walk" || step.toLevel === step.fromLevel) continue;
@@ -977,7 +1001,14 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           }[step.mode];
           const target =
             toLevel === null ? "" : ` to ${toLevel === 0 ? "street" : floorNumber(toLevel)}`;
-          pin([a[0], a[1]], `${name}${arrow}${target}`, fromLevel ?? a[2] ?? toLevel);
+          pin(
+            [a[0], a[1]],
+            `${name}${arrow}${target}`,
+            fromLevel ?? a[2] ?? toLevel,
+            "route",
+            undefined,
+            { flatOnly: true },
+          );
         }
         return { stationId: guide.station.id, pins };
       }),
@@ -1073,7 +1104,12 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
   const floorNames = threeD
     ? (indoorItem ?? indoorRoutes.find(({ station }) => station.id === nearby[0]?.id))?.floorNames
     : undefined;
-  const floorAlias = floorNames?.get(level);
+  const raisedFloorName = (l: number | null) =>
+    l === null
+      ? levelName(l)
+      : l === 0 && !floorNames?.get(0)
+        ? "street level"
+        : `floor ${floorLabel3d(l, floorNames)}`;
   const fitted = useRef<WalkItem | undefined>(undefined);
   const fittedTilt = useRef(false);
   useEffect(() => {
@@ -1083,7 +1119,7 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     (map.getSource("walk-active") as GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
       features:
-        pts.length === 0 || (threeD && indoorItem && item?.level != null)
+        pts.length === 0 || (threeD && indoorItem)
           ? []
           : [
               {
@@ -1103,35 +1139,60 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     if (!item || pts.length === 0 || (fitted.current === item && fittedTilt.current === threeD)) {
       return;
     }
-    const pitch = threeD ? (fittedTilt.current ? map.getPitch() : INDOOR_PITCH) : 0;
+    const entering3d = threeD && !fittedTilt.current;
+    const pitch = threeD ? (entering3d ? INDOOR_PITCH : map.getPitch()) : 0;
     fitted.current = item;
     fittedTilt.current = threeD;
     if (item.level !== null) setLevel(item.level);
+    const indoor = threeD ? indoorItem : undefined;
+    const tripPoints =
+      indoor?.routes.flatMap(({ line }) => line.map(([lng, lat]): LngLat => [lng, lat])) ?? [];
+    const tripPins = indoor
+      ? stationPins
+          .filter((p) => p.stationId === indoor.station.id)
+          .flatMap((p) => p.pins.filter((pin) => !pin.flatOnly))
+      : [];
     const b = new maplibregl.LngLatBounds(pts[0], pts[0]);
     for (const p of pts) b.extend(p);
+    for (const p of tripPoints) b.extend(p);
+    for (const pin of tripPins) b.extend(pin.point);
     const phone = window.innerWidth < 768;
-    const padding = phone
-      ? { top: 130, bottom: 290, left: 60, right: 90 }
-      : { top: 130, bottom: 150, left: 120, right: 120 };
-    const indoor = threeD && indoorItem && item.level !== null;
+    const padding = indoor
+      ? phone
+        ? { top: 180, bottom: 286, left: 55, right: 87 }
+        : { top: 110, bottom: 240, left: 215, right: 200 }
+      : phone
+        ? { top: 130, bottom: 290, left: 60, right: 90 }
+        : { top: 130, bottom: 150, left: 120, right: 120 };
     const maxZoom = indoor
-      ? 18.4
+      ? 18.5
       : item.kind === "entrance" || item.kind === "arrive" || item.kind === "board"
         ? 17.5
         : 19;
-    const bearing = threeD ? map.getBearing() : 0;
+    let bearing = threeD ? map.getBearing() : 0;
+    if (entering3d && phone && indoor && bearing === 0) {
+      // A long east-west station fits diagonally on a narrow screen.
+      const width = (b.getEast() - b.getWest()) * Math.cos((b.getCenter().lat * Math.PI) / 180);
+      if (width > (b.getNorth() - b.getSouth()) * 1.8) bearing = 42;
+    }
     const fit = { padding, maxZoom, bearing };
     let offsetY = 0;
-    if (indoor && item.level !== null) {
+    if (indoor) {
       const targetZoom = map.cameraForBounds(b, fit)?.zoom ?? maxZoom;
       const coordinate = maplibregl.MercatorCoordinate.fromLngLat(b.getCenter());
       const pixelsPerMeter = coordinate.meterInMercatorCoordinateUnits() * 512 * 2 ** targetZoom;
-      // Move the ground target down to keep the raised step clear of the top edge.
+      const heights = indoor.routes.flatMap(({ line, steps }) => [
+        ...line.flatMap((p) => (p[2] === null ? [] : [p[2]])),
+        ...steps.flatMap(({ fromLevel, toLevel }) =>
+          [fromLevel, toLevel].filter((l): l is number => l !== null),
+        ),
+      ]);
+      const middle = heights.length
+        ? (Math.min(...heights) + Math.max(...heights)) / 2
+        : (item.level ?? 0);
       offsetY = Math.min(
-        map.getCanvas().clientHeight * 0.24,
-        floorHeight(item.level, indoorItem.lowest) *
-          pixelsPerMeter *
-          Math.sin((pitch * Math.PI) / 180),
+        map.getCanvas().clientHeight * 0.16,
+        floorHeight(middle, indoor.lowest) * pixelsPerMeter * Math.sin((pitch * Math.PI) / 180),
       );
     }
     map.fitBounds(b, {
@@ -1140,43 +1201,41 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
       pitch,
       duration: 700,
     });
-  }, [item, indoorItem, ready, threeD]);
+  }, [item, indoorItem, stationPins, ready, threeD]);
 
   const view3d = useMemo(() => {
     if (!threeD) return;
-    const labels: IndoorLabel3d[] = [];
-    const features = indoorRoutes.flatMap(
-      ({ station, paths, lowest, streetEntrances, floorNames }) => {
-        const pins = stationPins.filter((p) => p.stationId === station.id).flatMap((p) => p.pins);
-        const active =
-          item?.stationId === station.id
-            ? { points: item.points, level: item.level, line: item.indoorLine }
-            : undefined;
-        labels.push(
-          ...build3dLabels(station, paths, level, lowest, pins, streetEntrances, floorNames),
-        );
-        return build3d([station], paths, level, dark, active, lowest, streetEntrances).features;
-      },
-    );
-    return { labels, shapes: { type: "FeatureCollection" as const, features } };
-  }, [threeD, indoorRoutes, stationPins, item, level, dark]);
+    const display = indoorItem ?? indoorRoutes.find(({ station }) => station.id === nearby[0]?.id);
+    if (!display) return;
+    const { station, routes, floorNames } = display;
+    const pins = stationPins
+      .filter((p) => p.stationId === station.id)
+      .flatMap((p) => p.pins.filter((pin) => !pin.flatOnly));
+    const active =
+      item?.stationId === station.id
+        ? {
+            points: item.points,
+            level: item.level ?? level,
+            ...(item.indoorStep ? { step: item.indoorStep } : {}),
+          }
+        : undefined;
+    return buildIndoorScene3d(station, routes, level, pins, floorNames, active);
+  }, [threeD, indoorItem, indoorRoutes, nearby, stationPins, item, level]);
 
-  // 3D view: build the shapes, swap the 2D indoor layers for them, and tilt the camera.
+  // Swap the flat indoor layers for the 3D stack.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
     for (const id of FLAT_INDOOR_LAYERS) {
       if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", threeD ? "none" : "visible");
     }
-    map.setLayoutProperty("indoor-3d", "visibility", threeD ? "visible" : "none");
-    // The basemap's own 3D buildings would hide the floors inside them.
+    map.setLayoutProperty("indoor-3d-shade", "visibility", threeD ? "visible" : "none");
+    // Keep the raised stack in front of the street-map buildings.
     for (const layer of map.getStyle().layers) {
-      if (layer.type === "fill-extrusion" && layer.id !== "indoor-3d") {
+      if (layer.type === "fill-extrusion") {
         map.setLayoutProperty(layer.id, "visibility", threeD ? "none" : "visible");
       }
     }
-    (map.getSource("indoor-3d") as GeoJSONSource | undefined)?.setData(view3d?.shapes ?? EMPTY);
-    // A mapped shop gets its destination badge on the slab. Outdoor endpoints stay at grade.
     const indoorFrom = walked.some(({ guide, out }) => guide.poi && !out);
     const indoorTo = walked.some(({ guide, out }) => guide.poi && out);
     map.setFilter(
@@ -1192,9 +1251,8 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           ]
         : null,
     );
-  }, [threeD, ready, view3d, walked]);
+  }, [threeD, ready, walked]);
   useEffect(() => {
-    // During a walkthrough the step is fitted again with the new tilt (below); else just tilt.
     if (!fitted.current)
       mapRef.current?.easeTo({ pitch: threeD ? INDOOR_PITCH : 0, duration: 600 });
   }, [threeD]);
@@ -1233,10 +1291,20 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
     });
   }, [itinerary]);
 
+  const routedFloors = view3d?.route.length
+    ? view3d.plates.map((plate) => plate.level).toReversed()
+    : undefined;
+  const floorOptions = routedFloors ?? levels;
+
   return (
     <div className="relative h-full w-full">
       <div ref={container} className="h-full w-full" />
-      {view3d && <IndoorLabels3d mapRef={mapRef} ready={ready} labels={view3d.labels} />}
+      {view3d && (
+        <>
+          <IndoorStack3d mapRef={mapRef} ready={ready} scene={view3d} dark={dark} />
+          <IndoorLabels3d mapRef={mapRef} ready={ready} labels={view3d.labels} walking={!!walk} />
+        </>
+      )}
       {walk && item && (
         <div className="absolute inset-x-2 bottom-[148px] z-20 mx-auto max-w-md rounded-xl border bg-background/97 p-2 shadow-lg md:bottom-4">
           <div className="flex items-center gap-1">
@@ -1257,8 +1325,8 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
                     ? "On board"
                     : item.kind === "board"
                       ? "Boarding"
-                      : threeD && item.floorName
-                        ? `Floor ${item.floorName}`
+                      : threeD && item.level !== null
+                        ? raisedFloorName(item.level).replace(/^./, (c) => c.toUpperCase())
                         : item.level === null
                           ? "floor unknown"
                           : item.level === 0
@@ -1266,7 +1334,15 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
                             : `Level ${item.level > 0 ? item.level : `−${-item.level}`}`}
                 </span>
               </div>
-              <div className="font-medium text-sm leading-snug">{item.text}</div>
+              <div className="font-medium text-sm leading-snug">
+                {threeD && item.indoorStep && item.indoorStep.mode !== "walk"
+                  ? describeStepWithFloorName(item.indoorStep, raisedFloorName)
+                  : threeD
+                    ? item.text.replace(/\blevel ([−-]?\d+\.\d+)/g, (_, value: string) =>
+                        raisedFloorName(Number(value.replace("−", "-"))),
+                      )
+                    : item.text}
+              </div>
             </div>
             <button
               type="button"
@@ -1301,28 +1377,26 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           3D
         </button>
       )}
-      {levels.length > 1 && (
+      {levels.length > 0 && floorOptions.length > 1 && (
         <div
           className="absolute top-[13.5rem] right-2.5 z-10 flex max-h-[34svh] flex-col overflow-y-auto rounded-md border bg-background/95 shadow-md md:top-56"
           role="radiogroup"
           aria-label="Floor"
         >
-          {levels.map((l) => (
+          {floorOptions.map((l) => (
             <button
               key={l}
               type="button"
               role="radio"
               aria-checked={l === level}
-              aria-label={
-                floorNames?.has(l) ? `Floor ${floorNames.get(l)} (${levelName(l)})` : levelName(l)
-              }
+              aria-label={threeD ? raisedFloorName(l) : levelName(l)}
               onClick={() => setLevel(l)}
               aria-description={usedLevels.has(l) ? "Your path uses this floor" : undefined}
-              className={`relative h-9 w-9 text-sm font-medium tabular-nums pointer-coarse:h-11 pointer-coarse:w-11 ${
+              className={`relative w-9 font-medium tabular-nums pointer-coarse:w-11 ${threeD ? "min-h-9 shrink-0 break-words px-1 text-xs pointer-coarse:min-h-11" : "h-9 text-sm pointer-coarse:h-11"} ${
                 l === level ? "bg-[#ff6319] text-white" : "hover:bg-muted"
               }`}
             >
-              {floorNames?.get(l) ?? floorNumber(l)}
+              {threeD ? floorLabel3d(l, floorNames) : floorNumber(l)}
               {usedLevels.has(l) && l !== level && (
                 <span
                   className="absolute top-1 right-1 size-1.5 rounded-full bg-[#ff6319]"
@@ -1333,16 +1407,12 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
           ))}
         </div>
       )}
-      {levels.length > 0 && (
+      {!threeD && levels.length > 0 && (
         <div
           className={`pointer-events-none absolute top-2 left-2 z-10 max-w-[60%] rounded-lg bg-background/95 px-2.5 py-1.5 text-[11px] shadow-md md:top-3 md:left-3 ${walk ? "max-md:hidden" : ""}`}
         >
           <div className="mb-1 font-semibold text-xs">
-            {floorAlias
-              ? `Floor ${floorAlias}`
-              : level === 0
-                ? "Street level"
-                : `Level ${floorNumber(level)}`}
+            {level === 0 ? "Street level" : `Level ${floorNumber(level)}`}
             <span className="font-normal text-muted-foreground">
               {level < 0 ? " · below street" : level > 0 ? " · above street" : ""}
             </span>
@@ -1355,7 +1425,6 @@ export function MapView({ itinerary, guides, from, to, walk, onWalk }: Props) {
             <Key color={INDOOR_COLORS.elevator} label="Lift" dot />
             <Key color={dark ? "#475569" : "#334155"} label="Exit letter" dot />
             <Key color={INDOOR_COLORS.path} label="Your exit" dot />
-            {threeD && <Key color={STREET_LINK} label="Street link" />}
           </ul>
         </div>
       )}

@@ -156,6 +156,7 @@ function Planner() {
         <MapView
           itinerary={current ?? itineraries[0]}
           guides={guides[selected ?? 0] ?? []}
+          graphs={graphs}
           {...(from ? { from } : {})}
           {...(to ? { to } : {})}
           {...(walk ? { walk } : {})}

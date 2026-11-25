@@ -1,226 +1,275 @@
 import { describe, expect, test } from "bun:test";
 
-import { build3d, build3dLabels, FLOOR_HEIGHT, floorHeight, lowestFloor, strip } from "./indoor-3d";
-import type { StationData } from "./station-types";
+import { reverseSteps } from "./guidance";
+import {
+  buildIndoorScene3d,
+  floorHeight,
+  floorLabel3d,
+  floorNames3d,
+  lowestFloor,
+  plateOutline,
+  ROUTE_LIFT,
+  type Route3d,
+  routeSections3d,
+} from "./indoor-3d";
+import type { LngLat, PathStep, PathVertex, StationData } from "./station-types";
 
-const station = {
+const a: LngLat = [24.93, 60.17];
+const b: LngLat = [24.9305, 60.17];
+const c: LngLat = [24.931, 60.17];
+const d: LngLat = [24.931, 60.1702];
+const step = (
+  mode: PathStep["mode"],
+  fromLevel: number,
+  toLevel: number,
+  a: number,
+  b: number,
+): PathStep => ({ mode, fromLevel, toLevel, a, b, meters: 25, seconds: 20 });
+
+const station: StationData = {
+  id: "station",
+  name: "Station",
+  lng: a[0],
+  lat: a[1],
+  levels: [1, 0, -2, -4],
   entrances: [],
+  platforms: [],
+  paths: [],
+  osmTimestamp: "",
   indoor: {
     type: "FeatureCollection",
     features: [
       {
         type: "Feature",
-        properties: { kind: "footway", lmin: -2, lmax: -2 },
-        geometry: {
-          type: "LineString",
-          coordinates: [
-            [24.93, 60.17],
-            [24.931, 60.17],
-          ],
-        },
+        properties: { kind: "footway", lmin: -4, lmax: -4 },
+        geometry: { type: "LineString", coordinates: [a, b] },
       },
       {
         type: "Feature",
-        properties: { kind: "escalator", lmin: -2, lmax: 0 },
-        geometry: {
-          type: "LineString",
-          coordinates: [
-            [24.931, 60.17],
-            [24.931, 60.1705],
-          ],
-        },
+        properties: { kind: "escalator", lmin: -4, lmax: 0 },
+        geometry: { type: "LineString", coordinates: [b, c, d] },
+      },
+      {
+        type: "Feature",
+        properties: { kind: "elevator", lmin: -4, lmax: 0 },
+        geometry: { type: "Point", coordinates: b },
+      },
+      {
+        type: "Feature",
+        properties: { kind: "footway", lmin: -2, lmax: -2 },
+        geometry: { type: "LineString", coordinates: [b, c] },
+      },
+      {
+        type: "Feature",
+        properties: { kind: "room", name: "Off-route shop", lmin: 0, lmax: 0 },
+        geometry: { type: "Polygon", coordinates: [[a, b, d, a]] },
       },
     ],
   },
-} as unknown as StationData;
+};
 
-describe("build3d", () => {
-  const shapes = build3d([station], [], 0, false).features;
-
-  test("puts the lowest floor one floor above the ground and stacks the rest", () => {
-    // The walkway is on floor -2, below the current floor 0, so it has the dimmed colour.
-    const walkway = shapes.find((s) => s.properties.color === "#cbd5e1");
-    expect(walkway?.properties.base).toBe(FLOOR_HEIGHT);
-  });
-
-  test("an escalator is a column from its lower floor to its upper floor", () => {
-    const esc = shapes.find((s) => s.properties.color === "#2563eb");
-    expect(esc?.properties.base).toBe(FLOOR_HEIGHT);
-    expect(esc?.properties.top).toBeGreaterThan(3 * FLOOR_HEIGHT);
-  });
-
-  test("a path that changes floor gets a column between the floors", () => {
-    const path = build3d(
-      [station],
-      [
-        [
-          [24.93, 60.17, -2],
-          [24.931, 60.17, -2],
-          [24.931, 60.1705, 0],
-        ],
+describe("raised route", () => {
+  test("spreads the rise along an escalator using distance between surveyed points", () => {
+    const escalator = step("escalator", -4, 0, 1, 3);
+    const route: Route3d = {
+      line: [
+        [...a, -4],
+        [...b, -4],
+        [...c, -4],
+        [...d, 0],
       ],
-      -2,
-      false,
-    ).features.filter((s) => s.properties.color === "#ff6319");
-    // One strip on floor -2, then the floor change: its run and its column.
-    expect(path).toHaveLength(3);
-    expect(path[2]?.properties.top).toBeGreaterThan(path[0]?.properties.top as number);
-  });
-});
-
-describe("cut-away", () => {
-  test("floors above the current one are left out, so they do not hide it", () => {
-    const below = build3d([station], [], -3, false).features;
-    expect(below).toHaveLength(0);
-  });
-});
-
-describe("strip", () => {
-  test("is a closed rectangle about the given width", () => {
-    const r = strip([24.93, 60.17], [24.931, 60.17], 4);
-    expect(r).toHaveLength(5);
-    expect(r[0]).toEqual(r[4]);
-    const widthDeg = Math.abs((r[0] as [number, number])[1] - (r[3] as [number, number])[1]);
-    expect(widthDeg * 111_320).toBeCloseTo(4, 1);
-  });
-});
-
-describe("floor heights", () => {
-  test("include the path's floors, so a deep path never goes under the ground", () => {
-    expect(lowestFloor([station], [[[24.93, 60.17, -5]]])).toBe(-5);
+      steps: [step("walk", -4, -4, 0, 1), escalator],
+      fallbackLevel: -4,
+    };
+    const sections = routeSections3d(route);
+    const ramp = sections.find((s) => s.step === escalator)!;
+    const walk = sections.find((s) => s.step?.mode === "walk")!;
+    expect(walk.points.at(-1)).toEqual(ramp.points[0]!);
+    expect(ramp.points.map((p) => p.slice(0, 2))).toEqual([b, c, d]);
+    expect(ramp.points.map((p) => p[2])).toEqual([-4, expect.closeTo(-1.78, 1), 0]);
+    expect(ramp.shaft).toBeUndefined();
+    const reverse = routeSections3d({
+      ...route,
+      line: route.line.toReversed(),
+      steps: reverseSteps(route.steps, route.line.length),
+    }).find((s) => s.step?.mode === "escalator");
+    expect(reverse?.points[1]?.[2]).toBeCloseTo(ramp.points[1]![2], 8);
+    expect(reverse?.points[0]).toEqual([...d, 0]);
   });
 
-  test("a floor change draws the run on the lower floor as well as the column", () => {
-    const shapes = build3d(
-      [],
-      [
-        [
-          [24.93, 60.17, -2],
-          [24.931, 60.17, 0],
-        ],
+  test("uses a vertical lift shaft with walks to and from it in both directions", () => {
+    const lift = step("elevator", -4, 0, 1, 1);
+    const line: PathVertex[] = [
+      [...a, -4],
+      [...b, -4],
+      [...c, 0],
+      [...d, 0],
+    ];
+    const steps = [step("walk", -4, -4, 0, 1), lift, step("walk", 0, 0, 2, 3)];
+    const up = routeSections3d({ line, steps, fallbackLevel: -4 }, [b]);
+    const down = routeSections3d(
+      {
+        line: line.toReversed(),
+        steps: reverseSteps(steps, line.length),
+        fallbackLevel: 0,
+      },
+      [b],
+    );
+    expect(up.find((s) => s.shaft)?.shaft).toEqual([
+      [...b, -4],
+      [...b, 0],
+    ]);
+    expect(down.find((s) => s.shaft)?.shaft).toEqual([
+      [...b, 0],
+      [...b, -4],
+    ]);
+    expect(up.find((s) => s.shaft)?.points.at(-1)).toEqual([...c, 0]);
+    expect(down.find((s) => s.shaft)?.points[0]).toEqual([...c, 0]);
+    expect(up.filter((s) => s.step?.mode === "walk")).toHaveLength(2);
+    expect(down.filter((s) => s.step?.mode === "walk")).toHaveLength(2);
+  });
+
+  test("renders an entrance lift even if the route lacks its upper landing vertex", () => {
+    const lift = step("elevator", -4, 0, 1, 1);
+    const sections = routeSections3d({
+      line: [
+        [...a, -4],
+        [...b, -4],
       ],
-      0,
-      false,
-      undefined,
-      -2,
-    );
-    const path = shapes.features.filter((s) => s.properties.color === "#ff6319");
-    expect(path).toHaveLength(2);
-    expect(path[0]?.properties.base).toBeCloseTo(FLOOR_HEIGHT + 0.6);
-  });
-});
-
-test("cut-away hides upper route strips and caps a rising connector", () => {
-  const shapes = build3d(
-    [],
-    [
-      [
-        [24.93, 60.17, -4],
-        [24.931, 60.17, 0],
-        [24.9315, 60.17, 0],
-      ],
-    ],
-    -4,
-    false,
-  ).features;
-  expect(shapes).toHaveLength(2);
-  expect(shapes[1]?.properties.top).toBeLessThan(floorHeight(-2, -4));
-});
-
-describe("street links and raised labels", () => {
-  const stationWithDoors = {
-    ...station,
-    indoor: {
-      ...station.indoor,
-      features: [
-        ...station.indoor.features,
-        {
-          type: "Feature" as const,
-          properties: { kind: "poi", name: "Shop", lmin: 0, lmax: 0 },
-          geometry: { type: "Point" as const, coordinates: [24.93, 60.17] as [number, number] },
-        },
-      ],
-    },
-    entrances: [
-      { id: "street", ref: "A", lng: 24.93, lat: 60.17, level: 0 },
-      { id: "lift", ref: "B", lng: 24.931, lat: 60.17, level: -2, liftTo: 0 },
-      { id: "upper", ref: "C", lng: 24.932, lat: 60.17, level: 1 },
-    ],
-  };
-
-  test("grounds street entrances and preserves the visible landing of a street lift", () => {
-    const onStreet = build3d([stationWithDoors], [], 1, false).features;
-    const columns = onStreet.filter(({ properties: p }) => p.base === 0 && p.top > 1);
-    expect(columns).toHaveLength(2);
-    expect(columns[0]?.properties.top).toBeCloseTo(floorHeight(0, -2) + 0.6);
-
-    const below = build3d([stationWithDoors], [], -2, false).features;
-    const shaft = below.find(({ properties: p }) => p.base === 0 && p.top > 1);
-    expect(shaft?.properties.top).toBeCloseTo(floorHeight(-2, -2) + 0.6);
+      steps: [step("walk", -4, -4, 0, 1), lift],
+      fallbackLevel: -4,
+    });
+    expect(sections[0]?.shaft).toEqual([
+      [...b, -4],
+      [...b, 0],
+    ]);
   });
 
-  test("puts the destination and named floor at slab height, with upper labels cut away", () => {
-    const point: [number, number] = [24.93, 60.17];
-    const labels = build3dLabels(
-      stationWithDoors,
-      [],
-      0,
-      -2,
-      [
-        { kind: "destination", text: "Shop", point, level: 0 },
-        { kind: "route", text: "Upstairs stop", point, level: 1 },
+  test("puts an unlevelled path and platform on the fallback floor", () => {
+    const route: Route3d = {
+      line: [
+        [...a, null],
+        [...b, null],
       ],
-      new Set(),
-      new Map([[0, "M"]]),
-    );
-    expect(labels.find((label) => label.kind === "current-floor")?.text).toBe("M");
-    expect(labels.filter((label) => label.text === "Shop")).toHaveLength(1);
-    expect(labels.find((label) => label.kind === "destination")?.height).toBeCloseTo(
-      floorHeight(0, -2) + 0.6,
-    );
-    expect(labels.some((label) => label.text === "Upstairs stop" || label.text === "Exit C")).toBe(
-      false,
-    );
-    expect(labels.find((label) => label.text === "−2")?.height).toBeCloseTo(
-      floorHeight(-2, -2) + 0.6,
-    );
-  });
-
-  test("a pin with no known floor stays on the current floor", () => {
-    const point: [number, number] = [24.93, 60.17];
-    const labels = build3dLabels(
+      steps: [],
+      fallbackLevel: -4,
+    };
+    const scene = buildIndoorScene3d(
       station,
-      [],
-      -2,
-      -2,
-      [{ kind: "route", text: "Board", point, level: null }],
-      new Set(),
+      [route],
+      -4,
+      [{ text: "Board", point: a, level: null, kind: "route" }],
       new Map(),
     );
-    expect(labels.find((label) => label.text === "Board")?.height).toBeCloseTo(
-      floorHeight(-2, -2) + 0.6,
+    expect(scene.plates.map(({ level }) => level)).toEqual([-4]);
+    expect(scene.labels.find((label) => label.text === "Board")?.anchors[0]?.[2]).toBeCloseTo(
+      floorHeight(-4, -4) + ROUTE_LIFT,
     );
+    expect(scene.route[0]?.points[0]?.[2]).toBeCloseTo(floorHeight(-4, -4) + ROUTE_LIFT);
   });
 });
 
-test("highlights a walkthrough lift as a raised connection", () => {
-  const point: [number, number] = [24.93, 60.17];
-  const shapes = build3d(
-    [],
-    [],
-    -2,
-    false,
-    {
-      points: [point, point],
-      level: -2,
-      line: [
-        [...point, -2],
-        [...point, 0],
+describe("schematic plates and labels", () => {
+  test("makes a bounded plate even if a floor is mapped as one point", () => {
+    const outline = plateOutline([a, a], a[1]);
+    expect(outline).toHaveLength(4);
+    expect(Math.min(...outline.map((p) => p[0]))).toBeLessThan(a[0]);
+    expect(Math.max(...outline.map((p) => p[1]))).toBeGreaterThan(a[1]);
+  });
+
+  test("keeps both route floors visible, with text on their edges, during a lower step", () => {
+    const escalator = step("escalator", -4, 0, 1, 2);
+    const scene = buildIndoorScene3d(
+      station,
+      [
+        {
+          line: [
+            [...a, -4],
+            [...b, -4],
+            [...d, 0],
+          ],
+          steps: [escalator],
+          fallbackLevel: -4,
+        },
       ],
-    },
-    -2,
-  ).features;
-  const highlight = shapes.find(({ properties }) => properties.color === "#facc15");
-  expect(highlight?.properties.base).toBe(floorHeight(-2, -2));
-  expect(highlight?.properties.top).toBeGreaterThan(floorHeight(-1, -2));
+      -4,
+      [{ text: "Shop", point: d, level: 0, kind: "destination" }],
+      new Map([[0, "M"]]),
+      { step: escalator, points: [b, d], level: -4 },
+    );
+    expect(scene.plates.map(({ level, active }) => [level, active])).toEqual([
+      [-4, true],
+      [0, false],
+    ]);
+    const floor = scene.labels.find((label) => label.kind === "floor")!;
+    expect(floor.text).toBe("M");
+    const [first, second] = scene.plates[1]!.ring;
+    expect(floor.anchors[0]).toEqual([
+      first![0] + (second![0] - first![0]) / 2,
+      first![1] + (second![1] - first![1]) / 2,
+      first![2],
+    ]);
+    expect(
+      scene.labels.filter((label) => !label.kind.includes("floor")).map(({ text }) => text),
+    ).toEqual(["Shop", "Escalator ↑ M"]);
+    expect(scene.labels.find(({ kind }) => kind === "active")?.anchors[0]?.[2]).toBeCloseTo(
+      (floorHeight(-4, -4) + floorHeight(0, -4)) / 2 + ROUTE_LIFT,
+    );
+    expect(scene.route.find(({ active }) => active)?.ramp).toBe(true);
+  });
+
+  test("joins the route to the boarding point on the platform", () => {
+    const route: Route3d = {
+      line: [
+        [...b, -4],
+        [...c, -4],
+      ],
+      steps: [],
+      fallbackLevel: -4,
+    };
+    const scene = buildIndoorScene3d(
+      station,
+      [route],
+      -4,
+      [{ text: "Board at the back", point: a, pathPoint: b, level: -4, kind: "route" }],
+      new Map(),
+    );
+    const height = floorHeight(-4, -4) + ROUTE_LIFT;
+    expect(scene.route.map(({ points }) => points)).toEqual([
+      [
+        [...b, height],
+        [...c, height],
+      ],
+      [
+        [...a, height],
+        [...b, height],
+      ],
+    ]);
+  });
+
+  test("honors a named mezzanine and replaces literal OSM fractional numbering", () => {
+    const names = floorNames3d([
+      { level: 0.5, floor: " M " },
+      { level: 0.5, floor: "M" },
+      { level: -0.5, floor: "G" },
+      { level: -0.5, floor: "K" },
+      { level: 1.5, floor: "1.5" },
+    ]);
+    expect(floorLabel3d(0.5, names)).toBe("M");
+    expect(floorLabel3d(-0.5, names)).toBe("0 mezz.");
+    expect(floorLabel3d(1.5, names)).toBe("1 mezz.");
+    expect(floorLabel3d(-4, names)).toBe("−4");
+  });
+
+  test("sets a stable height even for a lower level that appears only in the guide", () => {
+    expect(
+      lowestFloor(station, [
+        {
+          line: [[...a, -4]],
+          steps: [step("elevator", -6, -4, 0, 0)],
+          fallbackLevel: -4,
+        },
+      ]),
+    ).toBe(-6);
+  });
 });

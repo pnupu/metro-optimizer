@@ -423,9 +423,13 @@ export function levelName(level: number | null): string {
 
 /** One plain sentence for a path step. */
 export function describeStep(s: PathStep): string {
+  return describeStepWithFloorName(s, levelName);
+}
+
+export function describeStepWithFloorName(s: PathStep, nameOfLevel: typeof levelName): string {
   const up = s.fromLevel !== null && s.toLevel !== null && s.toLevel > s.fromLevel;
   const dir = s.fromLevel === s.toLevel ? "" : up ? " up" : " down";
-  const to = levelName(s.toLevel);
+  const to = nameOfLevel(s.toLevel);
   switch (s.mode) {
     case "walk":
       return `Walk ${Math.max(5, Math.round(s.meters / 5) * 5)} m`;
@@ -486,8 +490,7 @@ export interface WalkItem {
   kind: "entrance" | "platform" | PathStep["mode"] | "street" | "board" | "ride" | "arrive";
   /** The station and surveyed path used to draw this item in the indoor map. */
   stationId?: string;
-  floorName?: string;
-  indoorLine?: PathVertex[];
+  indoorStep?: PathStep;
 }
 
 /**
@@ -506,24 +509,13 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
     ...(trainEnd ? [trainEndPoint(guide, trainEnd)] : []),
   ];
   const level = (s: PathStep) => s.fromLevel ?? s.toLevel;
-  const transition = (s: PathStep): PathVertex[] => {
-    const line = guide.line.slice(s.a, s.b + 1);
-    const point = line[0];
-    const next = guide.line[s.b + 1];
-    return point && line.length === 1
-      ? [
-          [point[0], point[1], s.fromLevel],
-          next && next[2] === s.toLevel ? next : [point[0], point[1], s.toLevel],
-        ]
-      : line;
-  };
   const steps: WalkItem[] = guide.steps.map((s) => ({
     text: describeStep(s),
     level: level(s),
     // A floor change is a point in the data: show it with its neighbours for context.
     points: s.mode === "walk" ? span(s.a, s.b) : span(s.a - 1, s.b + 1),
     kind: s.mode,
-    ...(s.mode !== "walk" && s.fromLevel !== s.toLevel ? { indoorLine: transition(s) } : {}),
+    indoorStep: s,
   }));
   const platform: WalkItem = {
     text:
@@ -542,7 +534,6 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
         level: guide.poi.level,
         points: [entrance],
         kind: guide.direction === "in" ? "entrance" : "arrive",
-        ...(guide.poi.floor ? { floorName: guide.poi.floor } : {}),
       }
     : {
         text:
