@@ -484,6 +484,10 @@ export interface WalkItem {
   /** The part of the path to show: one point or a line. */
   points: LngLat[];
   kind: "entrance" | "platform" | PathStep["mode"] | "street" | "board" | "ride" | "arrive";
+  /** The station and surveyed path used to draw this item in the indoor map. */
+  stationId?: string;
+  floorName?: string;
+  indoorLine?: PathVertex[];
 }
 
 /**
@@ -502,12 +506,24 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
     ...(trainEnd ? [trainEndPoint(guide, trainEnd)] : []),
   ];
   const level = (s: PathStep) => s.fromLevel ?? s.toLevel;
+  const transition = (s: PathStep): PathVertex[] => {
+    const line = guide.line.slice(s.a, s.b + 1);
+    const point = line[0];
+    const next = guide.line[s.b + 1];
+    return point && line.length === 1
+      ? [
+          [point[0], point[1], s.fromLevel],
+          next && next[2] === s.toLevel ? next : [point[0], point[1], s.toLevel],
+        ]
+      : line;
+  };
   const steps: WalkItem[] = guide.steps.map((s) => ({
     text: describeStep(s),
     level: level(s),
     // A floor change is a point in the data: show it with its neighbours for context.
     points: s.mode === "walk" ? span(s.a, s.b) : span(s.a - 1, s.b + 1),
     kind: s.mode,
+    ...(s.mode !== "walk" && s.fromLevel !== s.toLevel ? { indoorLine: transition(s) } : {}),
   }));
   const platform: WalkItem = {
     text:
@@ -526,6 +542,7 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
         level: guide.poi.level,
         points: [entrance],
         kind: guide.direction === "in" ? "entrance" : "arrive",
+        ...(guide.poi.floor ? { floorName: guide.poi.floor } : {}),
       }
     : {
         text:
@@ -552,5 +569,7 @@ export function walkthrough(guide: StationGuide, trainEnd?: TrainEnd, toward?: s
     const item = steps[i];
     if (t && item) item.text = `${item.text} to ${t}`;
   });
-  return guide.direction === "in" ? [door, ...steps, platform] : [platform, ...steps, door];
+  return (guide.direction === "in" ? [door, ...steps, platform] : [platform, ...steps, door]).map(
+    (item) => ({ ...item, stationId: guide.station.id }),
+  );
 }
