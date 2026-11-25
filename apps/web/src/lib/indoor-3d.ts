@@ -45,7 +45,8 @@ const mix = (a: LngLat, b: LngLat, t: number): LngLat => [
 ];
 
 const valid = (level: number) => level >= MIN_LEVEL && Number.isFinite(level);
-const knownLevel = (level: number | null | undefined) => level != null && valid(level);
+export const knownLevel = (level: number | null | undefined): level is number =>
+  level != null && valid(level);
 
 export interface Route3d {
   line: PathVertex[];
@@ -85,8 +86,8 @@ export function routeSections3d(
     if (
       !start ||
       mode === "walk" ||
-      fromLevel == null ||
-      toLevel == null ||
+      !knownLevel(fromLevel) ||
+      !knownLevel(toLevel) ||
       fromLevel === toLevel
     ) {
       continue;
@@ -347,8 +348,12 @@ export function buildIndoorScene3d(
     const mode = step?.mode;
     const from = step?.fromLevel;
     const to = step?.toLevel;
-    const ramp = (mode === "escalator" || mode === "stairs") && from !== to;
-    if (mode && mode !== "walk" && from != null && to != null && from !== to) {
+    const ramp =
+      (mode === "escalator" || mode === "stairs") &&
+      knownLevel(from) &&
+      knownLevel(to) &&
+      from !== to;
+    if (mode && mode !== "walk" && knownLevel(from) && knownLevel(to) && from !== to) {
       const a = shaft?.[0] ?? points[0]!;
       const b = shaft?.[1] ?? points.at(-1)!;
       const p = points.length > 2 && !shaft ? points[Math.floor(points.length / 2)]! : undefined;

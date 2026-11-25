@@ -29,6 +29,7 @@ import {
   floorLabel3d,
   floorNames3d,
   floorNumber,
+  knownLevel,
   lowestFloor,
   type Route3d,
   type RoutePin3d,
@@ -719,6 +720,8 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
   const darkRef = useRef(dark);
   darkRef.current = dark;
   const styleUrl = useRef("");
+  /** True while the WebGL context is lost: the map has no style and must not load one. */
+  const contextLost = useRef(false);
   useEffect(() => {
     if (!container.current) return;
     styleUrl.current = darkRef.current ? STYLE.dark : STYLE.light;
@@ -746,12 +749,24 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
     );
     map.on("style.load", () => {
       englishLabels(map);
-      addOverlays(map, darkRef.current);
+      // Guard: a style restored from MapLibre's own snapshot would already hold the overlays.
+      if (!map.getSource("indoor")) addOverlays(map, darkRef.current);
       setReady((n) => n + 1);
     });
-    // After a lost WebGL context (e.g. iOS Safari in the background), MapLibre rebuilds the style
-    // but drops custom layers; a new `ready` adds the 3D stack and labels again.
-    map.on("webglcontextrestored", () => setReady((n) => n + 1));
+    // A lost WebGL context (e.g. iOS Safari in the background) removes the style. On restore,
+    // MapLibre rebuilds it from its snapshot (style.load then adds the custom 3D layers again).
+    // Load the style only when there is no snapshot (lost while loading) or the theme changed.
+    map.on("webglcontextlost", () => {
+      contextLost.current = true;
+      setReady(0);
+    });
+    map.on("webglcontextrestored", () => {
+      contextLost.current = false;
+      const want = darkRef.current ? STYLE.dark : STYLE.light;
+      if (map.style && styleUrl.current === want) return;
+      styleUrl.current = want;
+      map.setStyle(want, { diff: false });
+    });
     const onZoom = () => setZoom(map.getZoom());
     map.on("zoomend", onZoom);
     mapRef.current = map;
@@ -764,7 +779,8 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
   useEffect(() => {
     const map = mapRef.current;
     const want = dark ? STYLE.dark : STYLE.light;
-    if (!map || styleUrl.current === want) return;
+    // While the context is lost, the restore handler loads the right theme.
+    if (!map || contextLost.current || styleUrl.current === want) return;
     styleUrl.current = want;
     setReady(0);
     map.setStyle(want, { diff: false });
@@ -842,7 +858,7 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
         const routes = walks.map(({ guide, line }): Route3d => ({
           line,
           steps: guide.steps,
-          fallbackLevel: guide.platform.level ?? guide.entrance.level ?? 0,
+          fallbackLevel: [guide.platform.level, guide.entrance.level].find(knownLevel) ?? 0,
         }));
         const floorNames = floorNames3d(graphs.get(station.id)?.pois ?? []);
         for (const { guide } of walks) {
@@ -977,7 +993,16 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
         pin(
           platformPoint && [platformPoint[0], platformPoint[1]],
           out ? `Get off${end ? ` at the ${end}` : ""}` : `Board${end ? ` at the ${end}` : ""}`,
-          guide.platform.level ?? platformArrival?.[2] ?? guide.entrance.level ?? 0,
+          // With no platform floor, the pin takes the floor its route end is drawn on (as in
+          // routeSections3d: the nearest known level on the line, else the fallback level).
+          [
+            guide.platform.level,
+            (out
+              ? line.find((p) => knownLevel(p[2]))
+              : line.findLast((p) => knownLevel(p[2]))
+            )?.[2],
+            guide.entrance.level,
+          ].find(knownLevel) ?? 0,
           "route",
           undefined,
           platformArrival ? { pathPoint: [platformArrival[0], platformArrival[1]] } : {},
@@ -1188,18 +1213,21 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
       const targetZoom = map.cameraForBounds(b, fit)?.zoom ?? maxZoom;
       const coordinate = maplibregl.MercatorCoordinate.fromLngLat(b.getCenter());
       const pixelsPerMeter = coordinate.meterInMercatorCoordinateUnits() * 512 * 2 ** targetZoom;
-      const heights = indoor.routes.flatMap(({ line, steps }) => [
-        ...line.flatMap((p) => (p[2] === null ? [] : [p[2]])),
-        ...steps.flatMap(({ fromLevel, toLevel }) =>
-          [fromLevel, toLevel].filter((l): l is number => l !== null),
-        ),
-      ]);
+      const heights = indoor.routes
+        .flatMap(({ line, steps }) => [
+          ...line.map((p) => p[2]),
+          ...steps.flatMap(({ fromLevel, toLevel }) => [fromLevel, toLevel]),
+        ])
+        .filter(knownLevel);
       const middle = heights.length
         ? (Math.min(...heights) + Math.max(...heights)) / 2
         : (item.level ?? 0);
       offsetY = Math.min(
         map.getCanvas().clientHeight * 0.16,
-        floorHeight(middle, indoor.lowest) * pixelsPerMeter * Math.sin((pitch * Math.PI) / 180),
+        Math.max(
+          0,
+          floorHeight(middle, indoor.lowest) * pixelsPerMeter * Math.sin((pitch * Math.PI) / 180),
+        ),
       );
     }
     map.fitBounds(b, {
@@ -1301,7 +1329,10 @@ export function MapView({ itinerary, guides, graphs, from, to, walk, onWalk }: P
   const routedFloors = view3d?.route.length
     ? view3d.plates.map((plate) => plate.level).toReversed()
     : undefined;
-  const floorOptions = routedFloors ?? levels;
+  // Keep the floor shown in the picker, so it is never hidden with no floor checked.
+  const floorOptions = routedFloors
+    ? [...new Set([...routedFloors, level])].toSorted((a, b) => b - a)
+    : levels;
 
   return (
     <div className="relative h-full w-full">

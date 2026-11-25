@@ -254,54 +254,59 @@ export function IndoorStack3d({
     let viewport: WebGLUniformLocation | null;
     let uploaded: typeof mesh | undefined;
     const translated = new Float32Array(16);
-    map.addLayer({
-      id: LAYER,
-      type: "custom",
-      renderingMode: "2d",
-      onAdd(_map, gl: WebGL2RenderingContext) {
-        program = makeProgram(gl);
-        matrix = gl.getUniformLocation(program, "u_matrix");
-        viewport = gl.getUniformLocation(program, "u_viewport");
-        buffer = gl.createBuffer()!;
-        vao = gl.createVertexArray()!;
-        gl.bindVertexArray(vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-        const sizes = [3, 3, 2, 4];
-        let offset = 0;
-        for (const [i, size] of sizes.entries()) {
-          gl.enableVertexAttribArray(i);
-          gl.vertexAttribPointer(i, size, gl.FLOAT, false, STRIDE * 4, offset * 4);
-          offset += size;
-        }
-        gl.bindVertexArray(null);
-        gl.bindBuffer(gl.ARRAY_BUFFER, null);
-      },
-      onRemove(_map, gl: WebGL2RenderingContext) {
-        gl.deleteVertexArray(vao);
-        gl.deleteBuffer(buffer);
-        gl.deleteProgram(program);
-      },
-      render(gl, { defaultProjectionData: { mainMatrix: m } }) {
-        const current = latest.current;
-        if (map.getZoom() < 14 || !current.data.length) return;
-        gl.useProgram(program);
-        gl.bindVertexArray(vao);
-        if (uploaded !== current) {
+    map.addLayer(
+      {
+        id: LAYER,
+        type: "custom",
+        renderingMode: "2d",
+        onAdd(_map, gl: WebGL2RenderingContext) {
+          program = makeProgram(gl);
+          matrix = gl.getUniformLocation(program, "u_matrix");
+          viewport = gl.getUniformLocation(program, "u_viewport");
+          buffer = gl.createBuffer()!;
+          vao = gl.createVertexArray()!;
+          gl.bindVertexArray(vao);
           gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-          gl.bufferData(gl.ARRAY_BUFFER, current.data, gl.STATIC_DRAW);
+          const sizes = [3, 3, 2, 4];
+          let offset = 0;
+          for (const [i, size] of sizes.entries()) {
+            gl.enableVertexAttribArray(i);
+            gl.vertexAttribPointer(i, size, gl.FLOAT, false, STRIDE * 4, offset * 4);
+            offset += size;
+          }
+          gl.bindVertexArray(null);
           gl.bindBuffer(gl.ARRAY_BUFFER, null);
-          uploaded = current;
-        }
-        translated.set(m);
-        for (let i = 0; i < 4; i++) {
-          translated[i + 12] = m[i]! * current.origin.x + m[i + 4]! * current.origin.y + m[i + 12]!;
-        }
-        gl.uniformMatrix4fv(matrix, false, translated);
-        gl.uniform2f(viewport, map.getCanvas().clientWidth / 2, map.getCanvas().clientHeight / 2);
-        gl.drawArrays(gl.TRIANGLES, 0, current.data.length / STRIDE);
-        gl.bindVertexArray(null);
+        },
+        onRemove(_map, gl: WebGL2RenderingContext) {
+          gl.deleteVertexArray(vao);
+          gl.deleteBuffer(buffer);
+          gl.deleteProgram(program);
+        },
+        render(gl, { defaultProjectionData: { mainMatrix: m } }) {
+          const current = latest.current;
+          if (map.getZoom() < 14 || !current.data.length) return;
+          gl.useProgram(program);
+          gl.bindVertexArray(vao);
+          if (uploaded !== current) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, current.data, gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+            uploaded = current;
+          }
+          translated.set(m);
+          for (let i = 0; i < 4; i++) {
+            translated[i + 12] =
+              m[i]! * current.origin.x + m[i + 4]! * current.origin.y + m[i + 12]!;
+          }
+          gl.uniformMatrix4fv(matrix, false, translated);
+          gl.uniform2f(viewport, map.getCanvas().clientWidth / 2, map.getCanvas().clientHeight / 2);
+          gl.drawArrays(gl.TRIANGLES, 0, current.data.length / STRIDE);
+          gl.bindVertexArray(null);
+        },
       },
-    });
+      // Below the trip's start and end dots, so the plates do not mute them.
+      map.getLayer("ends") ? "ends" : undefined,
+    );
     return () => {
       if (map.getLayer(LAYER)) map.removeLayer(LAYER);
     };

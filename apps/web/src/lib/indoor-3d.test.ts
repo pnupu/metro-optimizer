@@ -273,3 +273,24 @@ describe("schematic plates and labels", () => {
     ).toBe(-6);
   });
 });
+
+test("an escalator step with an out-of-range floor is not drawn as a ramp", () => {
+  const escalator = step("escalator", -4, 0, 0, 1);
+  const scene = buildIndoorScene3d(
+    station,
+    [
+      {
+        line: [
+          [...a, -4],
+          [...b, -4],
+        ],
+        steps: [{ ...escalator, fromLevel: -99 }],
+        fallbackLevel: -4,
+      },
+    ],
+    -4,
+    [],
+    new Map(),
+  );
+  expect(scene.route.some((section) => section.ramp)).toBe(false);
+});
